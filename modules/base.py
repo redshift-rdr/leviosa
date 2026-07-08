@@ -1,24 +1,41 @@
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 
 from core.models import LeviosaContext, LeviosaRequest, LeviosaResponse
 
 
 class BaseModule(ABC):
+    # Whether analyze_one needs the response body. When False the engine skips
+    # reading the body entirely (body is b""), keeping status-only modules cheap
+    # and avoiding downloading large artefacts.
+    needs_body: bool = True
+
     def setup(self, args: list[str]) -> None:
         """Called once with remaining CLI args after main parsing. Override to handle module-specific flags."""
 
     @abstractmethod
     async def mutate(
         self,
-        requests: list[LeviosaRequest],
+        requests: Iterable[LeviosaRequest],
         context: LeviosaContext,
-    ) -> list[LeviosaRequest]:
-        """Return the requests to send. May be the same list, modified, or expanded."""
+    ) -> Iterable[LeviosaRequest]:
+        """
+        Return the requests to send as a sync iterable (a list, or a generator
+        for laziness so variants are produced on demand rather than all at once).
+        May be the same requests, modified, or expanded.
+        """
         ...
 
-    async def analyze(
+    async def analyze_one(
         self,
-        responses: list[LeviosaResponse],
+        response: LeviosaResponse,
         context: LeviosaContext,
     ) -> None:
-        """Called after all responses are received. Print findings to stdout."""
+        """
+        Called once per response, as each one completes (completion order, not
+        input order). Print findings to stdout. Aggregate across responses by
+        stashing state on context.data and acting in finalize(). Default no-op.
+        """
+
+    async def finalize(self, context: LeviosaContext) -> None:
+        """Called once after all responses have been analysed. Default no-op."""

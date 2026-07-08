@@ -1,15 +1,15 @@
 """
 End-to-end integration test: parsers → config → module loader → setup → run_modules.
-HTTP calls are mocked with aioresponses so no real network is needed.
+HTTP calls are mocked by replacing core.runner.send with a fake async generator.
 """
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from core.config import Config
 from core.loader import load_modules
 from core.models import LeviosaContext, LeviosaRequest, LeviosaResponse
-from core.parsers import detect_and_parse
+from core.parsers import request_source
 from core.runner import run_modules
 
 
@@ -22,9 +22,21 @@ def _fake_response(url: str, status: int) -> LeviosaResponse:
     )
 
 
+def gen_send(responses=None, captured=None):
+    """A fake core.requester.send: consumes the request iterable, yields responses."""
+    async def fake_send(reqs, config, read_body=True):
+        consumed = list(reqs)
+        if captured is not None:
+            captured.extend(consumed)
+        for resp in (responses or []):
+            yield resp
+
+    return fake_send
+
+
 class TestPathFuzzEndToEnd:
     """
-    Full pipeline: parse input → load module → setup → mutate → (mocked) send → analyze.
+    Full pipeline: parse input → load module → setup → mutate → (mocked) send → analyze_one.
     Asserts the correct findings reach stdout.
     """
 
@@ -32,7 +44,7 @@ class TestPathFuzzEndToEnd:
         wordlist = tmp_path / "words.txt"
         wordlist.write_text("admin\nbackup\nsecret\n")
 
-        requests = detect_and_parse("http://example.com/FUZZ")
+        source = request_source("http://example.com/FUZZ")
 
         modules = load_modules(["pathfuzz"])
         modules[0].setup(["--wordlist", str(wordlist)])
@@ -46,9 +58,8 @@ class TestPathFuzzEndToEnd:
             _fake_response("http://example.com/secret", 403),
         ]
 
-        with patch("core.runner.send", new_callable=AsyncMock) as mock_send:
-            mock_send.return_value = fake_responses
-            await run_modules(modules, requests, config, LeviosaContext())
+        with patch("core.runner.send", gen_send(responses=fake_responses)):
+            await run_modules(modules, source, config, LeviosaContext())
 
         out = capsys.readouterr().out
         lines = out.strip().splitlines()
@@ -63,7 +74,7 @@ class TestPathFuzzEndToEnd:
         wordlist.write_text("admin\nuser\n")
 
         # /api/v1 has 2 segments → 2 depth levels × 2 words = 4 mutated requests
-        requests = detect_and_parse("http://target.local/api/v1")
+        source = request_source("http://target.local/api/v1")
 
         modules = load_modules(["pathfuzz"])
         modules[0].setup(["--wordlist", str(wordlist), "--recursive"])
@@ -78,9 +89,8 @@ class TestPathFuzzEndToEnd:
             _fake_response("http://target.local/api/user/", 404),
         ]
 
-        with patch("core.runner.send", new_callable=AsyncMock) as mock_send:
-            mock_send.return_value = fake_responses
-            await run_modules(modules, requests, config, LeviosaContext())
+        with patch("core.runner.send", gen_send(responses=fake_responses)):
+            await run_modules(modules, source, config, LeviosaContext())
 
         out = capsys.readouterr().out
         lines = out.strip().splitlines()
@@ -93,7 +103,7 @@ class TestPathFuzzEndToEnd:
         wordlist = tmp_path / "words.txt"
         wordlist.write_text("admin\nlogin\n")
 
-        requests = detect_and_parse("http://example.com/FUZZ")
+        source = request_source("http://example.com/FUZZ")
 
         modules = load_modules(["pathfuzz"])
         modules[0].setup(["--wordlist", str(wordlist)])
@@ -101,12 +111,11 @@ class TestPathFuzzEndToEnd:
         config = Config()
         config.proxy_enabled = False
 
-        with patch("core.runner.send", new_callable=AsyncMock) as mock_send:
-            mock_send.return_value = []
-            await run_modules(modules, requests, config, LeviosaContext())
+        captured = []
+        with patch("core.runner.send", gen_send(captured=captured)):
+            await run_modules(modules, source, config, LeviosaContext())
 
-        sent = mock_send.call_args[0][0]
-        sent_urls = [r.url for r in sent]
+        sent_urls = [r.url for r in captured]
         assert "http://example.com/admin" in sent_urls
         assert "http://example.com/login" in sent_urls
 
@@ -126,8 +135,8 @@ class TestPathFuzzEndToEnd:
         wordlist = tmp_path / "words.txt"
         wordlist.write_text("admin\n")
 
-        requests = detect_and_parse(str(req_file))
-        assert len(requests) == 1
+        source = request_source(str(req_file))
+        assert len(list(source())) == 1
 
         modules = load_modules(["pathfuzz"])
         modules[0].setup(["--wordlist", str(wordlist)])
@@ -135,9 +144,8 @@ class TestPathFuzzEndToEnd:
         config = Config()
         config.proxy_enabled = False
 
-        with patch("core.runner.send", new_callable=AsyncMock) as mock_send:
-            mock_send.return_value = [_fake_response("http://example.com/admin", 200)]
-            await run_modules(modules, requests, config, LeviosaContext())
+        with patch("core.runner.send", gen_send(responses=[_fake_response("http://example.com/admin", 200)])):
+            await run_modules(modules, source, config, LeviosaContext())
 
         out = capsys.readouterr().out
         assert "200" in out
@@ -147,7 +155,7 @@ class TestPathFuzzEndToEnd:
         wordlist = tmp_path / "words.txt"
         wordlist.write_text("missing\nnope\n")
 
-        requests = detect_and_parse("http://example.com/FUZZ")
+        source = request_source("http://example.com/FUZZ")
 
         modules = load_modules(["pathfuzz"])
         modules[0].setup(["--wordlist", str(wordlist)])
@@ -160,8 +168,7 @@ class TestPathFuzzEndToEnd:
             _fake_response("http://example.com/nope", 404),
         ]
 
-        with patch("core.runner.send", new_callable=AsyncMock) as mock_send:
-            mock_send.return_value = fake_responses
-            await run_modules(modules, requests, config, LeviosaContext())
+        with patch("core.runner.send", gen_send(responses=fake_responses)):
+            await run_modules(modules, source, config, LeviosaContext())
 
         assert capsys.readouterr().out == ""

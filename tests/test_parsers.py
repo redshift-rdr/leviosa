@@ -2,7 +2,7 @@ import json
 import pytest
 from pathlib import Path
 
-from core.parsers import parse_url, parse_url_file, parse_request_file, detect_and_parse
+from core.parsers import parse_url, parse_url_file, parse_request_file, request_source
 
 EXAMPLE_JSON = Path(__file__).parent.parent / "example_requests_input_file.json"
 
@@ -25,26 +25,41 @@ class TestParseUrl:
 
 
 class TestParseUrlFile:
+    def test_is_generator(self, tmp_path):
+        import types
+        f = tmp_path / "urls.txt"
+        f.write_text("http://a.com\n")
+        assert isinstance(parse_url_file(str(f)), types.GeneratorType)
+
     def test_parses_multiple_urls(self, tmp_path):
         f = tmp_path / "urls.txt"
         f.write_text("http://a.com\nhttp://b.com\nhttp://c.com\n")
-        assert len(parse_url_file(str(f))) == 3
+        assert len(list(parse_url_file(str(f)))) == 3
 
     def test_blank_lines_ignored(self, tmp_path):
         f = tmp_path / "urls.txt"
         f.write_text("http://a.com\n\nhttp://b.com\n\n")
-        assert len(parse_url_file(str(f))) == 2
+        assert len(list(parse_url_file(str(f)))) == 2
 
     def test_urls_correct(self, tmp_path):
         f = tmp_path / "urls.txt"
         f.write_text("http://a.com\nhttp://b.com\n")
-        result = parse_url_file(str(f))
+        result = list(parse_url_file(str(f)))
         assert result[0].url == "http://a.com"
         assert result[1].url == "http://b.com"
 
+    def test_closes_file_on_partial_consumption(self, tmp_path):
+        # Take one item then drop the generator — the file handle must not leak.
+        f = tmp_path / "urls.txt"
+        f.write_text("http://a.com\nhttp://b.com\nhttp://c.com\n")
+        gen = parse_url_file(str(f))
+        first = next(gen)
+        gen.close()
+        assert first.url == "http://a.com"
+
     def test_missing_file_raises(self):
         with pytest.raises(FileNotFoundError):
-            parse_url_file("/nonexistent/path/urls.txt")
+            list(parse_url_file("/nonexistent/path/urls.txt"))
 
 
 class TestParseRequestFile:
@@ -91,21 +106,47 @@ class TestParseRequestFile:
             parse_request_file("/nonexistent/requests.json")
 
 
-class TestDetectAndParse:
+class TestRequestSource:
     def test_http_url(self):
-        result = detect_and_parse("http://example.com")
+        result = list(request_source("http://example.com")())
         assert len(result) == 1
         assert result[0].url == "http://example.com"
 
     def test_https_url(self):
-        result = detect_and_parse("https://example.com")
+        result = list(request_source("https://example.com")())
         assert len(result) == 1
         assert result[0].url == "https://example.com"
 
     def test_json_file(self):
-        assert len(detect_and_parse(str(EXAMPLE_JSON))) == 6
+        assert len(list(request_source(str(EXAMPLE_JSON))())) == 6
 
     def test_txt_file(self, tmp_path):
         f = tmp_path / "urls.txt"
         f.write_text("http://a.com\nhttp://b.com\n")
-        assert len(detect_and_parse(str(f))) == 2
+        assert len(list(request_source(str(f))())) == 2
+
+    def test_returns_fresh_iterator_each_call(self, tmp_path):
+        # Each module needs its own independent iterator over the same input.
+        f = tmp_path / "urls.txt"
+        f.write_text("http://a.com\nhttp://b.com\n")
+        source = request_source(str(f))
+        first = [r.url for r in source()]
+        second = [r.url for r in source()]
+        assert first == second == ["http://a.com", "http://b.com"]
+
+    def test_json_source_replays(self):
+        source = request_source(str(EXAMPLE_JSON))
+        assert len(list(source())) == 6
+        assert len(list(source())) == 6
+
+    def test_missing_file_raises_synchronously(self):
+        # Eager validation: the error surfaces when the source is built,
+        # not deep in the async pipeline.
+        with pytest.raises(FileNotFoundError):
+            request_source("/nonexistent/requests.json")
+
+    def test_malformed_json_raises_synchronously(self, tmp_path):
+        bad = tmp_path / "bad.json"
+        bad.write_text("{ not valid json }")
+        with pytest.raises(json.JSONDecodeError):
+            request_source(str(bad))

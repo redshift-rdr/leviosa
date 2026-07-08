@@ -2,11 +2,12 @@ import argparse
 import asyncio
 import json
 import sys
+from contextlib import aclosing
 
 from core.config import load_config
 from core.loader import load_modules
 from core.models import LeviosaContext
-from core.parsers import detect_and_parse
+from core.parsers import request_source
 from core.requester import send
 from core.runner import run_modules
 
@@ -40,6 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max concurrent requests (default: 20)",
     )
     parser.add_argument(
+        "--max-body-bytes",
+        type=int,
+        metavar="N",
+        help="Cap response body reads at N bytes (0 = unlimited, default: 1048576)",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Log debug info to stderr",
@@ -56,6 +63,8 @@ def main():
         config.proxy_enabled = False
     if args.concurrency is not None:
         config.concurrency = args.concurrency
+    if args.max_body_bytes is not None:
+        config.max_body_bytes = args.max_body_bytes
     if args.modules:
         config.modules = args.modules
     if args.verbose:
@@ -68,7 +77,7 @@ def main():
         print(f"[leviosa] proxy: {proxy_info}", file=sys.stderr)
 
     try:
-        requests = detect_and_parse(args.target)
+        source = request_source(args.target)
     except FileNotFoundError:
         print(f"error: file not found: {args.target!r}", file=sys.stderr)
         sys.exit(1)
@@ -77,7 +86,7 @@ def main():
         sys.exit(1)
 
     if config.verbose:
-        print(f"[leviosa] parsed {len(requests)} request(s) from {args.target!r}", file=sys.stderr)
+        print(f"[leviosa] target: {args.target!r}", file=sys.stderr)
         if config.modules:
             print(f"[leviosa] modules: {', '.join(config.modules)}", file=sys.stderr)
 
@@ -96,7 +105,7 @@ def main():
 
         context = LeviosaContext()
         try:
-            asyncio.run(run_modules(modules, requests, config, context))
+            asyncio.run(run_modules(modules, source, config, context))
         except KeyboardInterrupt:
             print("\n[leviosa] interrupted.", file=sys.stderr)
             sys.exit(130)
@@ -104,14 +113,18 @@ def main():
             print(f"error: {e}", file=sys.stderr)
             sys.exit(1)
     else:
+        # Raw dispatch: stream statuses as they complete. read_body=False since
+        # we only print the status line, so no body is ever downloaded.
+        async def _raw():
+            async with aclosing(send(source(), config, read_body=False)) as stream:
+                async for resp in stream:
+                    print(f"{resp.status} {resp.request.method} {resp.request.url}")
+
         try:
-            responses = asyncio.run(send(requests, config))
+            asyncio.run(_raw())
         except KeyboardInterrupt:
             print("\n[leviosa] interrupted.", file=sys.stderr)
             sys.exit(130)
-
-        for resp in responses:
-            print(f"{resp.status} {resp.request.method} {resp.request.url}")
 
 
 if __name__ == "__main__":

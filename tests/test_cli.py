@@ -30,6 +30,14 @@ class TestParser:
         args = build_parser().parse_args(["http://example.com"])
         assert args.concurrency is None
 
+    def test_max_body_bytes_override(self):
+        args = build_parser().parse_args(["http://example.com", "--max-body-bytes", "2048"])
+        assert args.max_body_bytes == 2048
+
+    def test_max_body_bytes_defaults_none(self):
+        args = build_parser().parse_args(["http://example.com"])
+        assert args.max_body_bytes is None
+
     def test_module_accumulates(self):
         args = build_parser().parse_args(["http://x.com", "--module", "a", "--module", "b"])
         assert args.modules == ["a", "b"]

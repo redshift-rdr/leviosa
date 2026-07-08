@@ -1,6 +1,6 @@
 import argparse
-import copy
 import re
+from dataclasses import replace
 from urllib.parse import urlparse, urlunparse
 
 from core.analysers import RegexAnalyser
@@ -114,6 +114,9 @@ class SensitiveFiles(pathfuzz.PathFuzzer):
         ".well-known/security.txt",
     ]
 
+    # Overrides PathFuzzer.needs_body: content signatures below inspect bodies.
+    needs_body = True
+
     def __init__(self):
         super().__init__()
         # Recursion at every path level is the whole point of this module.
@@ -168,7 +171,7 @@ class SensitiveFiles(pathfuzz.PathFuzzer):
             )
         return await super().mutate(requests, context)
 
-    def _recursive_variants(self, req) -> list:
+    def _recursive_variants(self, req):
         """
         Build one variant per (path depth × wordlist entry). Overrides
         PathFuzzer's version so that wordlist entries keep their own trailing
@@ -178,7 +181,6 @@ class SensitiveFiles(pathfuzz.PathFuzzer):
         segments = [s for s in parsed.path.rstrip("/").split("/") if s]
         # Probe every level from the root down to and including the full input
         # path (len(segments) + 1 levels); range(1) covers a bare-domain URL.
-        variants = []
         seen = set()
         for depth in range(len(segments) + 1):
             prefix = "/" + "/".join(segments[:depth]) if segments[:depth] else ""
@@ -189,18 +191,15 @@ class SensitiveFiles(pathfuzz.PathFuzzer):
                 if url in seen:
                     continue
                 seen.add(url)
-                new_req = copy.deepcopy(req)
-                new_req.url = url
-                variants.append(new_req)
-        return variants
+                # url-only mutation, safe to alias the unmutated headers/params.
+                yield replace(req, url=url)
 
-    async def analyze(self, responses, context):
-        for resp in responses:
-            if self._skip.matches(resp):
-                continue
-            flags = [name for name, an in self._content_flags if an.matches(resp)]
-            suffix = f"  [exposed: {', '.join(flags)}]" if flags else ""
-            print(
-                f"[SENSITIVEFILES] {resp.status} {resp.request.method} "
-                f"{resp.request.url}{suffix}"
-            )
+    async def analyze_one(self, response, context):
+        if self._skip.matches(response):
+            return
+        flags = [name for name, an in self._content_flags if an.matches(response)]
+        suffix = f"  [exposed: {', '.join(flags)}]" if flags else ""
+        print(
+            f"[SENSITIVEFILES] {response.status} {response.request.method} "
+            f"{response.request.url}{suffix}"
+        )

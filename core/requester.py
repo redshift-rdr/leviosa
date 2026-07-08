@@ -1,5 +1,6 @@
 import asyncio
 import sys
+from collections.abc import AsyncIterator, Iterable
 
 import aiohttp
 
@@ -50,40 +51,111 @@ def _build_kwargs(params: list[Param]) -> tuple[dict, dict[str, str]]:
     return kwargs, extra_headers
 
 
-async def send(requests: list[LeviosaRequest], config: Config) -> list[LeviosaResponse]:
+async def _read_capped(resp: aiohttp.ClientResponse, cap: int) -> bytes:
+    """
+    Read a response body with an optional size cap.
+
+    cap <= 0 reads the whole body. Otherwise the body is streamed in chunks and
+    accumulation stops once the cap is reached, so a hostile/huge body (e.g. a
+    backup.zip probed by sensitivefiles) never fully materialises in memory.
+    """
+    if cap <= 0:
+        return await resp.read()
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in resp.content.iter_chunked(65536):
+        chunks.append(chunk)
+        total += len(chunk)
+        if total >= cap:
+            break
+    return b"".join(chunks)[:cap]
+
+
+async def _send_one(
+    session: aiohttp.ClientSession,
+    request: LeviosaRequest,
+    config: Config,
+    read_body: bool,
+) -> LeviosaResponse:
     proxy = f"http://{config.proxy_host}:{config.proxy_port}" if config.proxy_enabled else None
-    semaphore = asyncio.Semaphore(config.concurrency)
-    timeout = aiohttp.ClientTimeout(total=30)
-    connector = aiohttp.TCPConnector(ssl=False)
+    headers = _parse_headers(request.headers)
+    kwargs, extra_headers = _build_kwargs(request.params)
+    headers.update(extra_headers)
+    try:
+        async with session.request(
+            method=request.method,
+            url=request.url,
+            headers=headers,
+            proxy=proxy,
+            **kwargs,
+        ) as resp:
+            body = await _read_capped(resp, config.max_body_bytes) if read_body else b""
+            return LeviosaResponse(
+                status=resp.status,
+                headers=dict(resp.headers),
+                body=body,
+                request=request,
+            )
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        if config.verbose:
+            print(
+                f"[leviosa] error: {request.method} {request.url}: {e}",
+                file=sys.stderr,
+            )
+        return LeviosaResponse(status=0, headers={}, body=b"", request=request)
 
-    async def _send_one(session: aiohttp.ClientSession, request: LeviosaRequest) -> LeviosaResponse:
-        async with semaphore:
-            headers = _parse_headers(request.headers)
-            kwargs, extra_headers = _build_kwargs(request.params)
-            headers.update(extra_headers)
-            try:
-                async with session.request(
-                    method=request.method,
-                    url=request.url,
-                    headers=headers,
-                    proxy=proxy,
-                    **kwargs,
-                ) as resp:
-                    body = await resp.read()
-                    return LeviosaResponse(
-                        status=resp.status,
-                        headers=dict(resp.headers),
-                        body=body,
-                        request=request,
-                    )
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                if config.verbose:
-                    print(
-                        f"[leviosa] error: {request.method} {request.url}: {e}",
-                        file=sys.stderr,
-                    )
-                return LeviosaResponse(status=0, headers={}, body=b"", request=request)
 
+async def send(
+    requests: Iterable[LeviosaRequest],
+    config: Config,
+    read_body: bool = True,
+) -> AsyncIterator[LeviosaResponse]:
+    """
+    Send requests and yield each LeviosaResponse as it completes.
+
+    Streaming, sliding-window engine: at most `config.concurrency` requests are
+    in flight at once, and responses are yielded in completion order (not input
+    order). Peak memory is therefore O(concurrency), not O(total requests) — the
+    caller consumes and drops each response before the next slot is refilled.
+
+    Only this coroutine touches the request iterator and the in-flight task set,
+    so there is no cross-task sharing, no sentinel bookkeeping, and StopIteration
+    is caught locally (PEP 479 safe).
+    """
+    timeout = aiohttp.ClientTimeout(total=config.timeout)
+    connector = aiohttp.TCPConnector(ssl=False, limit=config.concurrency)
+
+    req_iter = iter(requests)
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-        tasks = [_send_one(session, req) for req in requests]
-        return list(await asyncio.gather(*tasks))
+        inflight: set[asyncio.Task] = set()
+        try:
+            # Prime the window.
+            for _ in range(config.concurrency):
+                try:
+                    req = next(req_iter)
+                except StopIteration:
+                    break
+                inflight.add(asyncio.create_task(_send_one(session, req, config, read_body)))
+
+            while inflight:
+                done, inflight = await asyncio.wait(
+                    inflight, return_when=asyncio.FIRST_COMPLETED
+                )
+                for t in done:
+                    yield t.result()
+                # Refill one slot per completed task.
+                for _ in range(len(done)):
+                    try:
+                        req = next(req_iter)
+                    except StopIteration:
+                        break
+                    inflight.add(
+                        asyncio.create_task(_send_one(session, req, config, read_body))
+                    )
+        finally:
+            # Deterministic cleanup: cancel any in-flight tasks before the
+            # session closes so an early break / exception / Ctrl-C in the
+            # consumer never leaks tasks or an unclosed session.
+            for t in inflight:
+                t.cancel()
+            await asyncio.gather(*inflight, return_exceptions=True)

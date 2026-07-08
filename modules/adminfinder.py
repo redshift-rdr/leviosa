@@ -1,6 +1,6 @@
 import argparse
-import copy
 import re
+from dataclasses import replace
 from urllib.parse import urlparse, urlunparse
 
 from core.analysers import HeaderAnalyser, RegexAnalyser, StatusCodeAnalyser
@@ -81,6 +81,10 @@ class AdminFinder(pathfuzz.PathFuzzer):
         "settings/",
     ]
 
+    # Overrides PathFuzzer.needs_body: the body analysers below inspect response
+    # content, so the engine must read bodies.
+    needs_body = True
+
     def __init__(self):
         super().__init__()
         # AdminFinder builds URLs from the origin rather than a keyword in the
@@ -132,11 +136,12 @@ class AdminFinder(pathfuzz.PathFuzzer):
                 "adminfinder has no admin paths to test. Provide --admin-wordlist "
                 "with a non-empty file, or omit it to use the built-in list."
             )
-        variants = []
+        return self._admin_variants(requests)
+
+    def _admin_variants(self, requests):
         for req in requests:
             base = self._origin_request(req)
-            variants.extend(self._keyword_variants(base))
-        return variants
+            yield from self._keyword_variants(base)
 
     def _origin_request(self, req):
         """
@@ -148,21 +153,19 @@ class AdminFinder(pathfuzz.PathFuzzer):
         root = urlunparse(parsed._replace(
             path=f"/{self._keyword}", params="", query="", fragment="",
         ))
-        base = copy.deepcopy(req)
-        base.url = root
-        return base
+        # url-only mutation, safe to alias the unmutated headers/params.
+        return replace(req, url=root)
 
-    async def analyze(self, responses, context):
-        for resp in responses:
-            if self._skip.matches(resp):
-                continue
-            flags = []
-            if self._auth_status.matches(resp) and self._auth_header.matches(resp):
-                flags.append("auth-challenge")
-            if self._login_body.matches(resp):
-                flags.append("login-page")
-            suffix = f"  [likely admin: {', '.join(flags)}]" if flags else ""
-            print(
-                f"[ADMINFINDER] {resp.status} {resp.request.method} "
-                f"{resp.request.url}{suffix}"
-            )
+    async def analyze_one(self, response, context):
+        if self._skip.matches(response):
+            return
+        flags = []
+        if self._auth_status.matches(response) and self._auth_header.matches(response):
+            flags.append("auth-challenge")
+        if self._login_body.matches(response):
+            flags.append("login-page")
+        suffix = f"  [likely admin: {', '.join(flags)}]" if flags else ""
+        print(
+            f"[ADMINFINDER] {response.status} {response.request.method} "
+            f"{response.request.url}{suffix}"
+        )

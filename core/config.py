@@ -9,6 +9,8 @@ class Config:
     proxy_host: str = "127.0.0.1"
     proxy_port: int = 8080
     concurrency: int = 20
+    max_body_bytes: int = 1_048_576
+    timeout: int = 30
     modules: list[str] = field(default_factory=list)
     verbose: bool = False
 
@@ -30,4 +32,10 @@ def load_config(toml_path: str = "leviosa.toml") -> Config:
     concurrency = data.get("concurrency", {})
     if "limit" in concurrency:
         config.concurrency = concurrency["limit"]
+    body = data.get("body", {})
+    if "max_bytes" in body:
+        config.max_body_bytes = body["max_bytes"]
+    request = data.get("request", {})
+    if "timeout" in request:
+        config.timeout = request["timeout"]
     return config

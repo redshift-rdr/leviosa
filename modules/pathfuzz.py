@@ -1,5 +1,5 @@
 import argparse
-import copy
+from dataclasses import replace
 from urllib.parse import urlparse, urlunparse
 
 from core.analysers import StatusCodeAnalyser
@@ -21,6 +21,10 @@ class PathFuzzer(BaseModule):
              http://example.com/word/
              http://example.com/home/word/
     """
+
+    # Path fuzzing only inspects status codes, so the engine can skip reading
+    # response bodies entirely.
+    needs_body = False
 
     def __init__(self):
         self._wordlist: list[str] | None = None
@@ -50,42 +54,37 @@ class PathFuzzer(BaseModule):
                 "Pass it after the leviosa flags, e.g.: "
                 "leviosa target.json --module pathfuzz --wordlist words.txt"
             )
-        variants = []
+        return self._variants(requests)
+
+    def _variants(self, requests):
+        """Lazily yield one variant at a time so the whole set never resides in memory."""
         for req in requests:
             if self._recursive:
-                variants.extend(self._recursive_variants(req))
+                yield from self._recursive_variants(req)
             else:
-                variants.extend(self._keyword_variants(req))
-        return variants
+                yield from self._keyword_variants(req)
 
-    def _keyword_variants(self, req) -> list:
+    def _keyword_variants(self, req):
         if self._keyword not in req.url:
-            return []
-        variants = []
+            return
         for word in self._wordlist:
-            new_req = copy.deepcopy(req)
-            new_req.url = req.url.replace(self._keyword, word)
-            variants.append(new_req)
-        return variants
+            # url-only mutation: replace() shallow-copies, safe to share the
+            # unmutated headers/params (the engine only reads them).
+            yield replace(req, url=req.url.replace(self._keyword, word))
 
-    def _recursive_variants(self, req) -> list:
+    def _recursive_variants(self, req):
         parsed = urlparse(req.url)
         segments = [s for s in parsed.path.rstrip("/").split("/") if s]
         # Always fuzz at least the root level, even for bare-domain URLs
         depth_count = max(len(segments), 1)
-        variants = []
         for depth in range(depth_count):
             prefix_parts = segments[:depth]
             prefix = "/" + "/".join(prefix_parts) if prefix_parts else ""
             for word in self._wordlist:
                 fuzz_path = f"{prefix}/{word}/"
                 new_parsed = parsed._replace(path=fuzz_path)
-                new_req = copy.deepcopy(req)
-                new_req.url = urlunparse(new_parsed)
-                variants.append(new_req)
-        return variants
+                yield replace(req, url=urlunparse(new_parsed))
 
-    async def analyze(self, responses, context):
-        for resp in responses:
-            if not self._skip.matches(resp):
-                print(f"[PATHFUZZ] {resp.status} {resp.request.method} {resp.request.url}")
+    async def analyze_one(self, response, context):
+        if not self._skip.matches(response):
+            print(f"[PATHFUZZ] {response.status} {response.request.method} {response.request.url}")

@@ -175,6 +175,15 @@ Run tests: `pytest --cov=core --cov=modules`. Run a single file: `pytest tests/t
 
 ## Phase 3 — Async Request Engine
 
+> **Streaming update (implemented).** `send` is now an **async generator**, not a
+> batch function. It uses a **sliding window** of at most `config.concurrency`
+> in-flight tasks and **yields each `LeviosaResponse` as it completes** (output is
+> completion-ordered, not input-ordered). Bodies are read through a size cap
+> (`config.max_body_bytes`, default 1 MB; `0` = unlimited) via `_read_capped`, and
+> `read_body=False` skips the body entirely. Peak memory is O(concurrency), not
+> O(total requests). Callers must wrap the stream in `contextlib.aclosing` so the
+> engine's `finally` (cancel in-flight tasks, close the session) always runs.
+
 **Goal**: `leviosa.py` sends real HTTP requests (no modules yet, just raw dispatch).
 
 ### Steps
@@ -212,6 +221,16 @@ Use `aioresponses` to mock all HTTP calls — no real network in tests.
 ---
 
 ## Phase 4 — Module System
+
+> **Streaming update (implemented).** The batch `analyze(list)` was replaced by
+> `async def analyze_one(self, response, context)` (called once per response, in
+> completion order) plus an optional `async def finalize(self, context)` (called
+> once after the stream drains) for aggregate findings. `mutate` returns a **sync
+> iterable** (usually a lazy generator), not a materialised list, and modules carry
+> a `needs_body: bool = True` class attr that maps to `send`'s `read_body`. The
+> runner takes a **requests factory** (`Callable[[], Iterable[LeviosaRequest]]`) so
+> each module gets a fresh iterator, and streams each module with
+> `async with aclosing(send(...)) as stream: async for resp in stream: analyze_one`.
 
 **Goal**: modules are loaded, chained, and run. A no-op module can be dropped into `modules/` and exercised end-to-end.
 
@@ -277,6 +296,16 @@ Use `aioresponses` to mock all HTTP calls — no real network in tests.
 ---
 
 ## Phase 5 — Fuzzer Module
+
+> **Streaming update.** Since responses now arrive in **completion order**, the
+> fuzzer cannot treat "the first response per request" as the baseline. Mark the
+> baseline explicitly instead — e.g. tag the baseline variant (a sentinel param /
+> hashkey / `context.data` entry) so `analyze_one` can recognise it whenever it
+> arrives, buffering per-request comparison state on `context.data` and emitting in
+> `finalize`. `mutate` should `yield` variants lazily rather than returning one big
+> list. The fuzzer mutates `param.value`, so it must keep `copy.deepcopy` (or
+> deep-copy only the touched `Param`) — `dataclasses.replace` is only safe for the
+> url-only path modules.
 
 **Goal**: a working `modules/fuzzer.py` that injects payloads into request parameters.
 

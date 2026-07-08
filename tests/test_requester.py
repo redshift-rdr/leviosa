@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import aclosing
 
 import aiohttp
 import pytest
@@ -7,6 +8,11 @@ from aioresponses import CallbackResult, aioresponses
 from core.config import Config
 from core.models import LeviosaRequest, Param
 from core.requester import _build_kwargs, _parse_headers, send
+
+
+async def collect(requests, config, read_body=True):
+    """Drain the streaming engine into a list (completion order)."""
+    return [r async for r in send(requests, config, read_body=read_body)]
 
 
 def make_request(url="http://example.com", method="GET", params=None, headers=None):
@@ -127,20 +133,20 @@ class TestSend:
     async def test_status_code_captured(self, cfg):
         with aioresponses() as m:
             m.get("http://example.com", status=200, body=b"")
-            responses = await send([make_request()], cfg)
+            responses = await collect([make_request()], cfg)
         assert responses[0].status == 200
 
     async def test_body_captured(self, cfg):
         with aioresponses() as m:
             m.get("http://example.com", status=200, body=b"hello world")
-            responses = await send([make_request()], cfg)
+            responses = await collect([make_request()], cfg)
         assert responses[0].body == b"hello world"
 
     async def test_request_back_reference(self, cfg):
         req = make_request()
         with aioresponses() as m:
             m.get("http://example.com", status=200, body=b"")
-            responses = await send([req], cfg)
+            responses = await collect([req], cfg)
         assert responses[0].request is req
 
     async def test_all_requests_returned(self, cfg):
@@ -148,40 +154,46 @@ class TestSend:
             m.get("http://a.com", status=200, body=b"")
             m.get("http://b.com", status=404, body=b"")
             m.get("http://c.com", status=500, body=b"")
-            responses = await send(
+            responses = await collect(
                 [make_request("http://a.com"), make_request("http://b.com"), make_request("http://c.com")],
                 cfg,
             )
         assert len(responses) == 3
 
-    async def test_response_order_preserved(self, cfg):
+    async def test_all_responses_delivered_regardless_of_order(self, cfg):
+        # Output is completion-ordered, so match statuses to URLs via a dict.
         with aioresponses() as m:
             m.get("http://a.com", status=200, body=b"")
             m.get("http://b.com", status=201, body=b"")
             m.get("http://c.com", status=202, body=b"")
-            responses = await send(
+            responses = await collect(
                 [make_request("http://a.com"), make_request("http://b.com"), make_request("http://c.com")],
                 cfg,
             )
-        assert [r.status for r in responses] == [200, 201, 202]
+        by_url = {r.request.url: r.status for r in responses}
+        assert by_url == {
+            "http://a.com": 200,
+            "http://b.com": 201,
+            "http://c.com": 202,
+        }
 
     async def test_head_method(self, cfg):
         with aioresponses() as m:
             m.head("http://example.com", status=200, body=b"")
-            responses = await send([make_request(method="HEAD")], cfg)
+            responses = await collect([make_request(method="HEAD")], cfg)
         assert responses[0].status == 200
 
     async def test_post_method(self, cfg):
         with aioresponses() as m:
             m.post("http://example.com", status=201, body=b"")
             req = make_request(method="POST", params=[Param(type="json", name="k", value="v")])
-            responses = await send([req], cfg)
+            responses = await collect([req], cfg)
         assert responses[0].status == 201
 
     async def test_client_error_returns_zero_status(self, cfg):
         with aioresponses() as m:
             m.get("http://example.com", exception=aiohttp.ClientConnectionError())
-            responses = await send([make_request()], cfg)
+            responses = await collect([make_request()], cfg)
         assert responses[0].status == 0
         assert responses[0].body == b""
 
@@ -189,7 +201,7 @@ class TestSend:
         with aioresponses() as m:
             m.get("http://fail.com", exception=aiohttp.ClientConnectionError())
             m.get("http://ok.com", status=200, body=b"")
-            responses = await send(
+            responses = await collect(
                 [make_request("http://fail.com"), make_request("http://ok.com")],
                 cfg,
             )
@@ -204,7 +216,7 @@ class TestSend:
             for i in range(10):
                 m.get(f"http://example.com/page{i}", status=200, body=b"")
             requests = [make_request(f"http://example.com/page{i}") for i in range(10)]
-            responses = await send(requests, cfg)
+            responses = await collect(requests, cfg)
         assert len(responses) == 10
         assert all(r.status == 200 for r in responses)
 
@@ -225,7 +237,7 @@ class TestSend:
             for i in range(9):
                 m.get(f"http://example.com/p{i}", callback=counting_callback)
             requests = [make_request(f"http://example.com/p{i}") for i in range(9)]
-            await send(requests, cfg)
+            await collect(requests, cfg)
 
         assert max_in_flight <= 3
 
@@ -236,12 +248,84 @@ class TestSend:
         config.proxy_port = 8080
         with aioresponses() as m:
             m.get("http://example.com", status=200, body=b"")
-            responses = await send([make_request()], config)
+            responses = await collect([make_request()], config)
         assert responses[0].status == 200
 
     async def test_header_from_request_sent(self, cfg):
         req = make_request(headers=["GET /path HTTP/1.1", "X-Custom: testval"])
         with aioresponses() as m:
             m.get("http://example.com", status=200, body=b"")
-            responses = await send([req], cfg)
+            responses = await collect([req], cfg)
         assert responses[0].status == 200
+
+
+# ---------------------------------------------------------------------------
+# Body cap / read_body
+# ---------------------------------------------------------------------------
+
+class TestBodyCap:
+    async def test_body_truncated_to_cap(self, cfg):
+        cfg.max_body_bytes = 10
+        with aioresponses() as m:
+            m.get("http://example.com", status=200, body=b"x" * 100)
+            responses = await collect([make_request()], cfg)
+        assert responses[0].body == b"x" * 10
+
+    async def test_cap_zero_reads_full_body(self, cfg):
+        cfg.max_body_bytes = 0
+        with aioresponses() as m:
+            m.get("http://example.com", status=200, body=b"y" * 5000)
+            responses = await collect([make_request()], cfg)
+        assert responses[0].body == b"y" * 5000
+
+    async def test_body_shorter_than_cap_untouched(self, cfg):
+        cfg.max_body_bytes = 1000
+        with aioresponses() as m:
+            m.get("http://example.com", status=200, body=b"short")
+            responses = await collect([make_request()], cfg)
+        assert responses[0].body == b"short"
+
+    async def test_read_body_false_yields_empty_body(self, cfg):
+        with aioresponses() as m:
+            m.get("http://example.com", status=200, body=b"hello world")
+            responses = await collect([make_request()], cfg, read_body=False)
+        assert responses[0].status == 200
+        assert responses[0].body == b""
+
+
+# ---------------------------------------------------------------------------
+# Deterministic cleanup — abandoning the stream must not leak tasks/sessions
+# ---------------------------------------------------------------------------
+
+class TestCleanup:
+    def _pending(self):
+        return [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+
+    async def test_early_break_leaves_no_pending_tasks(self, cfg):
+        cfg.concurrency = 5
+        with aioresponses() as m:
+            for i in range(20):
+                m.get(f"http://example.com/p{i}", status=200, body=b"")
+            requests = [make_request(f"http://example.com/p{i}") for i in range(20)]
+            async with aclosing(send(iter(requests), cfg)) as stream:
+                async for _ in stream:
+                    break
+        await asyncio.sleep(0)  # let cancellations settle
+        assert self._pending() == []
+
+    async def test_exception_in_consumer_leaves_no_pending_tasks(self, cfg):
+        cfg.concurrency = 5
+
+        class Boom(Exception):
+            pass
+
+        with aioresponses() as m:
+            for i in range(20):
+                m.get(f"http://example.com/p{i}", status=200, body=b"")
+            requests = [make_request(f"http://example.com/p{i}") for i in range(20)]
+            with pytest.raises(Boom):
+                async with aclosing(send(iter(requests), cfg)) as stream:
+                    async for _ in stream:
+                        raise Boom()
+        await asyncio.sleep(0)
+        assert self._pending() == []

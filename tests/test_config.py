@@ -15,6 +15,12 @@ class TestConfigDefaults:
     def test_concurrency(self):
         assert Config().concurrency == 20
 
+    def test_max_body_bytes(self):
+        assert Config().max_body_bytes == 1_048_576
+
+    def test_timeout(self):
+        assert Config().timeout == 30
+
     def test_modules_empty(self):
         assert Config().modules == []
 
@@ -66,3 +72,15 @@ class TestLoadConfig:
         config = load_config(str(f))
         assert config.proxy_enabled is True
         assert config.concurrency == 20
+
+    def test_body_max_bytes(self, tmp_path):
+        f = tmp_path / "leviosa.toml"
+        f.write_text("[body]\nmax_bytes = 2048\n")
+        config = load_config(str(f))
+        assert config.max_body_bytes == 2048
+
+    def test_request_timeout(self, tmp_path):
+        f = tmp_path / "leviosa.toml"
+        f.write_text("[request]\ntimeout = 5\n")
+        config = load_config(str(f))
+        assert config.timeout == 5

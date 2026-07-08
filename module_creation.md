@@ -58,6 +58,11 @@ class LeviosaContext:
 # modules/base.py
 
 class BaseModule(ABC):
+    # Whether analyze_one needs the response body. When False the engine skips
+    # reading bodies entirely (response.body is b""), keeping status-only
+    # modules cheap and avoiding downloading large artefacts. Default True.
+    needs_body: bool = True
+
     def setup(self, args: list[str]) -> None:
         """
         Called once before mutate/analyze, with any CLI args not consumed by
@@ -68,24 +73,32 @@ class BaseModule(ABC):
     @abstractmethod
     async def mutate(
         self,
-        requests: list[LeviosaRequest],
+        requests: Iterable[LeviosaRequest],
         context: LeviosaContext,
-    ) -> list[LeviosaRequest]:
+    ) -> Iterable[LeviosaRequest]:
         """
-        Return the list of requests to send. You may return the original list
-        unchanged, modify requests in-place (use copy.deepcopy to be safe),
-        or return an expanded list (e.g. one input → many fuzz variants).
+        Return the requests to send as a *sync iterable* (a list, or — better —
+        a lazy generator so the whole set never resides in memory). You may
+        return the original requests unchanged, modify them, or expand them
+        (one input → many fuzz variants). Never return an async generator: the
+        engine pulls the iterable with next().
         """
         ...
 
-    async def analyze(
+    async def analyze_one(
         self,
-        responses: list[LeviosaResponse],
+        response: LeviosaResponse,
         context: LeviosaContext,
     ) -> None:
         """
-        Called after all responses are received. Print findings to stdout.
-        Default implementation is a no-op.
+        Called once per response, as each one completes. Print findings to
+        stdout. Default implementation is a no-op.
+        """
+
+    async def finalize(self, context: LeviosaContext) -> None:
+        """
+        Called once after all responses have been analysed. Emit aggregate
+        findings here. Default implementation is a no-op.
         """
 ```
 
@@ -95,7 +108,9 @@ class BaseModule(ABC):
 - **File name = module name.** A module at `modules/sqli.py` is loaded with `--module sqli`.
 - **`mutate` is required.** It is the only abstract method. If you have nothing to mutate, `return requests`.
 - **Each module receives the original requests**, not the output of a previous module. Mutations do not chain between modules.
-- **`analyze` output goes to stdout.** Use `print()`. Prefix lines with `[MODULENAME]` by convention.
+- **`analyze_one` output goes to stdout.** Use `print()`. Prefix lines with `[MODULENAME]` by convention.
+- **Responses stream in completion order, one at a time.** `analyze_one` never sees the whole list. To compare across responses (baseline, counts, diffs) accumulate on `context.data` during `analyze_one`, then act in `finalize`.
+- **Set `needs_body = False`** if you only inspect status/headers — the engine then never reads the body (`response.body` is `b""`). With the default `needs_body = True`, bodies are read up to `config.max_body_bytes` (the `--max-body-bytes` cap, default 1 MB), so a very large body may be truncated.
 
 ---
 
@@ -172,14 +187,13 @@ HeaderAnalyser(name: str, value: str | None = None, pattern: str | None = None)
 
 Header name lookup is case-insensitive. Text and value comparisons respect `case_sensitive` / are case-insensitive by default for `HeaderAnalyser`.
 
-### Using analysers in analyze()
+### Using analysers in analyze_one()
 
 ```python
-async def analyze(self, responses, context):
-    for resp in responses:
-        for analyser in self._analysers:
-            if hit := analyser.matches(resp):
-                print(f"[MYMODULE] {hit} — {resp.request.method} {resp.request.url}")
+async def analyze_one(self, response, context):
+    for analyser in self._analysers:
+        if hit := analyser.matches(response):
+            print(f"[MYMODULE] {hit} — {response.request.method} {response.request.url}")
 ```
 
 Analysers are stateless — safe to instantiate once in `setup()` and reuse across all responses.
@@ -195,6 +209,8 @@ from core.analysers import HeaderAnalyser
 
 
 class HeaderCheck(BaseModule):
+    needs_body = False  # only inspects headers — engine skips reading bodies
+
     def __init__(self):
         self._analysers = [
             HeaderAnalyser("Server"),
@@ -205,11 +221,10 @@ class HeaderCheck(BaseModule):
     async def mutate(self, requests, context):
         return requests  # send original requests unchanged
 
-    async def analyze(self, responses, context):
-        for resp in responses:
-            for analyser in self._analysers:
-                if hit := analyser.matches(resp):
-                    print(f"[HEADERCHECK] {hit} — {resp.request.url}")
+    async def analyze_one(self, response, context):
+        for analyser in self._analysers:
+            if hit := analyser.matches(response):
+                print(f"[HEADERCHECK] {hit} — {response.request.url}")
 ```
 
 ---
@@ -249,23 +264,36 @@ class ParamFuzzer(BaseModule):
     async def mutate(self, requests, context):
         if self._wordlist is None:
             raise RuntimeError("paramfuzz requires --wordlist and --param")
-        variants = []
+        # A generator keeps memory flat: variants are produced on demand as the
+        # engine pulls them, never all at once.
+        return self._variants(requests)
+
+    def _variants(self, requests):
         for req in requests:
             for word in self._wordlist:
+                # This module mutates param.value in place, so it MUST deepcopy:
+                # dataclasses.replace() only shallow-copies and would alias the
+                # params/Param objects across variants, corrupting siblings.
                 new_req = copy.deepcopy(req)
                 for param in new_req.params:
                     if param.name == self._param_name:
                         param.value = word
-                variants.append(new_req)
-        return variants
+                yield new_req
 
-    async def analyze(self, responses, context):
-        for resp in responses:
-            hits = [a.matches(resp) for a in self._analysers if a.matches(resp)]
-            if hits:
-                desc = ", ".join(hits)
-                print(f"[PARAMFUZZ] {desc} — {resp.request.method} {resp.request.url}")
+    async def analyze_one(self, response, context):
+        hits = [a.matches(response) for a in self._analysers if a.matches(response)]
+        if hits:
+            desc = ", ".join(hits)
+            print(f"[PARAMFUZZ] {desc} — {response.request.method} {response.request.url}")
 ```
+
+> **Copying variants — `replace` vs `deepcopy`.** For a **url-only** mutation
+> (path fuzzers that only rewrite `req.url`), `dataclasses.replace(req, url=...)`
+> is the right tool: it makes a fresh request while safely sharing the unmutated
+> `headers`/`params` (the engine only reads them). But when you mutate a `Param`
+> value or a header — as `paramfuzz` does — you **must** `copy.deepcopy(req)`
+> (or deep-copy just the touched `Param`), because `replace` aliases the params
+> list and mutating one variant's param would silently change every sibling.
 
 ---
 
@@ -273,9 +301,11 @@ class ParamFuzzer(BaseModule):
 
 - [ ] File is at `modules/<name>.py`
 - [ ] Exactly one class inheriting `BaseModule`
-- [ ] `mutate` is implemented (even if it just returns `requests`)
+- [ ] `mutate` is implemented (even if it just returns `requests`) and returns a **sync iterable** — a list or a lazy generator, never an async generator
 - [ ] `setup` uses `parse_known_args` (not `parse_args`) to ignore other modules' flags
 - [ ] Missing required flags raise `RuntimeError` with a usage hint
-- [ ] `copy.deepcopy(req)` used before mutating a request object
+- [ ] Copying variants: `dataclasses.replace(req, url=...)` for **url-only** mutation; `copy.deepcopy(req)` when mutating `params`/headers
+- [ ] Cross-response logic accumulates on `context.data` in `analyze_one` and emits in `finalize` (responses stream one at a time, in completion order)
+- [ ] `needs_body = False` set if only status/headers are inspected
 - [ ] Findings printed to stdout; prefix with `[MODULENAME]`
 - [ ] `status == 0` means a network error — handle or filter as appropriate
