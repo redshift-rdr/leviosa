@@ -38,6 +38,19 @@ class TestParser:
         args = build_parser().parse_args(["http://example.com"])
         assert args.max_body_bytes is None
 
+    def test_cookies_flag(self):
+        args = build_parser().parse_args(["http://x.com", "--cookies", "session=abc"])
+        assert args.cookies == "session=abc"
+
+    def test_cookie_from_flag(self):
+        args = build_parser().parse_args(["http://x.com", "--cookie-from", "fresh.json"])
+        assert args.cookie_from == "fresh.json"
+
+    def test_cookie_flags_default_none(self):
+        args = build_parser().parse_args(["http://x.com"])
+        assert args.cookies is None
+        assert args.cookie_from is None
+
     def test_module_accumulates(self):
         args = build_parser().parse_args(["http://x.com", "--module", "a", "--module", "b"])
         assert args.modules == ["a", "b"]

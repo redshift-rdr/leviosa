@@ -57,6 +57,26 @@ leviosa http://target.local --no-proxy --verbose
 leviosa requests.json --no-proxy --max-body-bytes 65536
 ```
 
+#### refreshing timed-out session cookies
+
+Captured requests go stale when their session cookie expires. Refresh the
+cookies **by name** across every request (and every module) without re-editing
+the input file:
+
+```bash
+# Paste a fresh Cookie header (e.g. copied from browser devtools)
+leviosa requests.json --no-proxy --cookies "session=NEW; csrf=NEW"
+
+# ...or pull fresh cookies from a freshly captured request file
+leviosa requests.json --no-proxy --cookie-from fresh_capture.json
+```
+
+Both replace matching cookies wherever they appear in the captured request — the
+structured cookie params **and** the raw `Cookie:` header — leaving all other
+cookies and everything else untouched. Only cookies already present are replaced
+(matched by name); if both flags are given, `--cookies` values win over
+`--cookie-from`.
+
 #### config file (`leviosa.toml`)
 
 CLI flags always win over the TOML file. Relevant blocks:

@@ -5,6 +5,11 @@ import sys
 from contextlib import aclosing
 
 from core.config import load_config
+from core.cookies import (
+    overrides_from_donor,
+    overrides_from_header_string,
+    with_cookie_overrides,
+)
 from core.loader import load_modules
 from core.models import LeviosaContext
 from core.parsers import request_source
@@ -47,6 +52,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Cap response body reads at N bytes (0 = unlimited, default: 1048576)",
     )
     parser.add_argument(
+        "--cookies",
+        metavar="STR",
+        help="Replace cookie values by name using a pasted Cookie header, "
+             "e.g. --cookies \"session=abc; csrf=xyz\"",
+    )
+    parser.add_argument(
+        "--cookie-from",
+        metavar="FILE",
+        help="Replace cookie values using cookies from a freshly captured "
+             "request JSON file (refreshes a timed-out session)",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Log debug info to stderr",
@@ -85,8 +102,30 @@ def main():
         print(f"error: malformed JSON in {args.target!r}: {e.msg}", file=sys.stderr)
         sys.exit(1)
 
+    # Cookie overrides refresh timed-out session cookies. Donor file first, then
+    # the pasted header on top so an explicit --cookies value always wins.
+    cookie_overrides: dict[str, str] = {}
+    try:
+        if args.cookie_from:
+            cookie_overrides.update(overrides_from_donor(args.cookie_from))
+        if args.cookies:
+            cookie_overrides.update(overrides_from_header_string(args.cookies))
+    except FileNotFoundError:
+        print(f"error: cookie file not found: {args.cookie_from!r}", file=sys.stderr)
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"error: malformed JSON in cookie file {args.cookie_from!r}: {e.msg}", file=sys.stderr)
+        sys.exit(1)
+    source = with_cookie_overrides(source, cookie_overrides)
+
     if config.verbose:
         print(f"[leviosa] target: {args.target!r}", file=sys.stderr)
+        if cookie_overrides:
+            print(
+                f"[leviosa] overriding {len(cookie_overrides)} cookie(s): "
+                f"{', '.join(cookie_overrides)}",
+                file=sys.stderr,
+            )
         if config.modules:
             print(f"[leviosa] modules: {', '.join(config.modules)}", file=sys.stderr)
 

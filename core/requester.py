@@ -4,6 +4,12 @@ from collections.abc import AsyncIterator, Iterable
 
 import aiohttp
 
+# handle weird characters in cookie key error
+import http.cookies
+http.cookies._is_legal_key = lambda key: bool(key) and not any(
+    c in ' \t\n\r' for c in key
+)
+
 from core.config import Config
 from core.models import LeviosaRequest, LeviosaResponse, Param
 
