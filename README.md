@@ -35,7 +35,7 @@ in memory-constrained environments:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install --no-index --find-links=./bundled_requirements aiohttp
 ```
 
 ### usage
