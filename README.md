@@ -170,10 +170,31 @@ leviosa requests.json --module versiondisclosure
 leviosa http://target.local --module versiondisclosure \
     --extra-header X-My-Version --no-heuristic
 
+# errorpages — induce error pages and flag information disclosure in them
+#   emits variants per request (missing path, invalid method, oversized/malformed
+#   URL, hostile param values) and reports 4xx/5xx responses + body signatures
+#   (stack traces, SQL errors, filesystem paths, debug pages)
+leviosa requests.json --module errorpages
+
+# errorpages — restrict to specific techniques, shrink the long-url payload
+leviosa http://target.local/app --module errorpages \
+    --techniques not-found,param-injection,bad-method --long-url-len 1024
+
 # Chain multiple modules (each receives the original requests; context is shared)
 leviosa requests.json --module pathfuzz --module passthrough \
     --wordlist wordlists/common.txt
 ```
+
+The `errorpages` module induces errors several ways — `not-found` (nonexistent
+path → 404), `bad-method` (invalid verb → 405/501), `long-url` and
+`special-path` (malformed URL → 414/400/500), `param-injection` (breaks existing
+params) and `junk-param` (adds hostile params so it works even with none).
+Restrict the set with `--techniques`. Each response is reported with the
+technique that induced it, plus any information-disclosure signatures found in
+the body; a per-status / per-signature summary prints at the end. Note that
+parameter injection only mutates params parsed into request objects (e.g. from a
+JSON request file) — for a bare URL carrying a `?query=...` string, `junk-param`
+provides the coverage.
 
 The `versiondisclosure` module sends requests unchanged and inspects only
 response headers (no bodies downloaded). Each response with a disclosure is
