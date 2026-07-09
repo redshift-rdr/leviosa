@@ -51,5 +51,5 @@ pip install -e ".[dev]"
 No build system or test suite exists yet. Once the entry point is created, the expected invocation is:
 
 ```bash
-python leviosa.py <url|url-list|requests.json> [--module <name>] [--proxy URL] [--no-proxy] [--log-db PATH] [--no-log]
+python leviosa.py <url|url-list|requests.json> [--module <name>] [--proxy URL] [--no-proxy] [--log-db PATH] [--no-log] [--follow-redirects]
 ```

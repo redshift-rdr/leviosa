@@ -60,6 +60,18 @@ class TestParser:
         args = build_parser().parse_args(["http://example.com"])
         assert args.max_body_bytes is None
 
+    def test_follow_redirects_flag(self):
+        args = build_parser().parse_args(["http://example.com", "--follow-redirects"])
+        assert args.follow_redirects is True
+
+    def test_follow_redirects_short_flag(self):
+        args = build_parser().parse_args(["http://example.com", "-L"])
+        assert args.follow_redirects is True
+
+    def test_follow_redirects_defaults_false(self):
+        args = build_parser().parse_args(["http://example.com"])
+        assert args.follow_redirects is False
+
     def test_cookies_flag(self):
         args = build_parser().parse_args(["http://x.com", "--cookies", "session=abc"])
         assert args.cookies == "session=abc"

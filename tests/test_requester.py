@@ -318,6 +318,31 @@ class TestSend:
             responses = await collect([req], cfg)
         assert responses[0].status == 200
 
+    async def test_redirect_not_followed_by_default(self, cfg):
+        # Default config.follow_redirects is False: the 302 itself is returned.
+        assert cfg.follow_redirects is False
+        with aioresponses() as m:
+            m.get(
+                "http://example.com",
+                status=302,
+                headers={"Location": "http://example.com/next"},
+            )
+            responses = await collect([make_request()], cfg)
+        assert responses[0].status == 302
+
+    async def test_redirect_followed_when_enabled(self):
+        config = Config()
+        config.follow_redirects = True
+        with aioresponses() as m:
+            m.get(
+                "http://example.com",
+                status=302,
+                headers={"Location": "http://example.com/next"},
+            )
+            m.get("http://example.com/next", status=200, body=b"")
+            responses = await collect([make_request()], config)
+        assert responses[0].status == 200
+
 
 # ---------------------------------------------------------------------------
 # Body cap / read_body

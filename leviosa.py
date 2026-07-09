@@ -69,6 +69,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Cap response body reads at N bytes (0 = unlimited, default: 1048576)",
     )
     parser.add_argument(
+        "--follow-redirects", "-L",
+        action="store_true",
+        help="Follow HTTP redirects (default: off, redirects are reported as-is)",
+    )
+    parser.add_argument(
         "--cookies",
         metavar="STR",
         help="Replace cookie values by name using a pasted Cookie header, "
@@ -105,6 +110,8 @@ def main():
         config.concurrency = args.concurrency
     if args.max_body_bytes is not None:
         config.max_body_bytes = args.max_body_bytes
+    if args.follow_redirects:
+        config.follow_redirects = True
     if args.modules:
         config.modules = args.modules
     if args.verbose:

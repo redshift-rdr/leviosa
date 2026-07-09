@@ -56,6 +56,9 @@ leviosa http://target.local --verbose
 
 # Cap response body reads at 64 KB (0 = unlimited; default 1 MB)
 leviosa requests.json --max-body-bytes 65536
+
+# Follow HTTP redirects (off by default — redirects are reported as-is)
+leviosa http://target.local --follow-redirects   # or -L
 ```
 
 #### proxying
@@ -131,7 +134,8 @@ limit = 20          # max requests in flight (== --concurrency)
 max_bytes = 1048576 # response-body read cap in bytes, 0 = unlimited (== --max-body-bytes)
 
 [request]
-timeout = 30        # per-request total timeout in seconds
+timeout = 30            # per-request total timeout in seconds
+follow_redirects = false # follow HTTP redirects (== --follow-redirects / -L)
 
 [log]
 enabled = true      # write the sqlite traffic log (== --no-log to disable)

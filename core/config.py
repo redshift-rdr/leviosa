@@ -19,6 +19,9 @@ class Config:
     concurrency: int = 20
     max_body_bytes: int = 1_048_576
     timeout: int = 30
+    # Follow HTTP redirects. Off by default so a scan sees the actual response
+    # at each URL (status, headers) rather than the redirect target.
+    follow_redirects: bool = False
     modules: list[str] = field(default_factory=list)
     verbose: bool = False
     # Local sqlite traffic log. Captures every request/response the tool sends,
@@ -51,6 +54,8 @@ def load_config(toml_path: str = "leviosa.toml") -> Config:
     request = data.get("request", {})
     if "timeout" in request:
         config.timeout = request["timeout"]
+    if "follow_redirects" in request:
+        config.follow_redirects = request["follow_redirects"]
     log = data.get("log", {})
     if "enabled" in log:
         config.log_enabled = log["enabled"]

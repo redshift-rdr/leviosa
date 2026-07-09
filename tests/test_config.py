@@ -30,6 +30,9 @@ class TestConfigDefaults:
     def test_timeout(self):
         assert Config().timeout == 30
 
+    def test_follow_redirects_default(self):
+        assert Config().follow_redirects is False
+
     def test_modules_empty(self):
         assert Config().modules == []
 
@@ -100,3 +103,9 @@ class TestLoadConfig:
         f.write_text("[request]\ntimeout = 5\n")
         config = load_config(str(f))
         assert config.timeout == 5
+
+    def test_follow_redirects(self, tmp_path):
+        f = tmp_path / "leviosa.toml"
+        f.write_text("[request]\nfollow_redirects = true\n")
+        config = load_config(str(f))
+        assert config.follow_redirects is True

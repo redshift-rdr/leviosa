@@ -133,6 +133,7 @@ async def _send_one(
             headers=headers,
             proxy=proxy,
             proxy_auth=proxy_auth,
+            allow_redirects=config.follow_redirects,
             **kwargs,
         ) as resp:
             body = await _read_capped(resp, config.max_body_bytes) if read_body else b""
