@@ -75,6 +75,22 @@ class TestPassthroughModule:
     def test_base_module_defaults_to_no_burp(self):
         assert BaseModule.use_burp is False
 
+    def test_no_filters_by_default(self):
+        m = PassthroughModule()
+        m.setup([])
+        assert m.request_filters() == []
+
+    def test_setup_builds_standard_filters(self):
+        from core.filters import MethodFilter, SampleFilter
+
+        m = PassthroughModule()
+        m.setup(["--method", "POST", "--sample", "5"])
+        kinds = [type(f) for f in m.request_filters()]
+        assert kinds == [MethodFilter, SampleFilter]
+
+    def test_base_module_request_filters_default_empty(self):
+        assert BaseModule.request_filters(PassthroughModule()) == []
+
 
 # ---------------------------------------------------------------------------
 # run_modules integration tests (send() is patched with a fake async generator)
@@ -340,3 +356,76 @@ class TestRunModules:
             await run_modules([], lambda: iter([make_request()]), cfg, LeviosaContext())
 
         assert called["n"] == 0
+
+    async def test_request_filters_applied_before_mutate(self, cfg):
+        from core.filters import MethodFilter
+
+        received = []
+
+        class FilteredModule(BaseModule):
+            def request_filters(self):
+                return [MethodFilter(["POST"])]
+
+            async def mutate(self, requests, context):
+                reqs = list(requests)
+                received.extend(reqs)
+                return reqs
+
+        def factory():
+            return iter([
+                make_request("http://a.com"),  # GET (default)
+                LeviosaRequest("POST", "http://b.com", [], []),
+                LeviosaRequest("POST", "http://c.com", [], []),
+            ])
+
+        with patch("core.runner.send", fake_send_factory()):
+            await run_modules([FilteredModule()], factory, cfg, LeviosaContext())
+
+        # Only the POSTs reach mutate; the GET is filtered out first.
+        assert [r.url for r in received] == ["http://b.com", "http://c.com"]
+
+    async def test_filters_compose_in_order(self, cfg):
+        from core.filters import MethodFilter, TakeFilter
+
+        received = []
+
+        class FilteredModule(BaseModule):
+            def request_filters(self):
+                return [MethodFilter(["POST"]), TakeFilter(1)]
+
+            async def mutate(self, requests, context):
+                reqs = list(requests)
+                received.extend(reqs)
+                return reqs
+
+        def factory():
+            return iter([
+                LeviosaRequest("GET", "http://a.com", [], []),
+                LeviosaRequest("POST", "http://b.com", [], []),
+                LeviosaRequest("POST", "http://c.com", [], []),
+            ])
+
+        with patch("core.runner.send", fake_send_factory()):
+            await run_modules([FilteredModule()], factory, cfg, LeviosaContext())
+
+        # POST filter first, then take 1 → only the first POST.
+        assert [r.url for r in received] == ["http://b.com"]
+
+    async def test_no_filters_passes_all(self, cfg):
+        received = []
+
+        class PlainModule(BaseModule):
+            async def mutate(self, requests, context):
+                reqs = list(requests)
+                received.extend(reqs)
+                return reqs
+
+        with patch("core.runner.send", fake_send_factory()):
+            await run_modules(
+                [PlainModule()],
+                lambda: iter([make_request("http://a.com"), make_request("http://b.com")]),
+                cfg,
+                LeviosaContext(),
+            )
+
+        assert len(received) == 2

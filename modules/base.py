@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 
+from core.filters import RequestFilter
 from core.models import LeviosaContext, LeviosaRequest, LeviosaResponse
 
 
@@ -18,6 +19,19 @@ class BaseModule(ABC):
 
     def setup(self, args: list[str]) -> None:
         """Called once with remaining CLI args after main parsing. Override to handle module-specific flags."""
+
+    def request_filters(self) -> list[RequestFilter]:
+        """
+        Filters applied, in order, to the input requests before mutate() sees
+        them — for sampling or restricting a module's inputs (e.g. only POSTs,
+        or a random sample of 5). Default: none.
+
+        Typically populated in setup() from CLI flags (see core.filters:
+        add_filter_args / filters_from_args) and returned here. Filters are plain
+        Iterable->Iterable objects, so they can also be applied by hand to a
+        module's own output inside mutate().
+        """
+        return []
 
     @abstractmethod
     async def mutate(

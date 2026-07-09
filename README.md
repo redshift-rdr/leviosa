@@ -201,6 +201,25 @@ response headers (no bodies downloaded). Each response with a disclosure is
 reported as it arrives, and a deduplicated inventory of every distinct
 `Header: value` — effectively a technology-stack summary — is printed at the end.
 
+#### request filters
+
+A module can restrict or sample the requests it receives before it runs, via
+**request filters** (`core/filters.py`). Modules that opt in expose the standard
+flags — `--method` (repeatable), `--path` (regex on the URL path), `--sample N`
+and `--sample-seed` — which compose (selective filters first, then sampling).
+`passthrough` is wired up as the reference:
+
+```bash
+# Replay only the POST requests from a captured set
+leviosa requests.json --module passthrough --method POST
+
+# Work on a reproducible random sample of 5 requests to /api paths
+leviosa requests.json --module passthrough --path '^/api' --sample 5 --sample-seed 7
+```
+
+Filters are pluggable: a new one is just a `RequestFilter` (or `PredicateFilter`)
+subclass. See the "Request filters" section in `module_creation.md`.
+
 ### writing a module
 
 Drop a `.py` file into `modules/` that defines exactly one `BaseModule` subclass:

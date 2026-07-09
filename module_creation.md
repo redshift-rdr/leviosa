@@ -121,6 +121,75 @@ class BaseModule(ABC):
 
 ---
 
+## Request filters
+
+A module can restrict or sample the requests it receives *before* `mutate()`
+sees them by declaring **request filters**. A filter is a lazy stream
+transformer, `Iterable[LeviosaRequest] -> Iterable[LeviosaRequest]`; the runner
+applies a module's `request_filters()` (in order) to the input requests.
+
+Built-in filters live in `core.filters`:
+
+```python
+from core.filters import (
+    RequestFilter,      # ABC: implement apply(requests) -> requests
+    PredicateFilter,    # ABC for per-request keep/drop: implement keep(request) -> bool
+    MethodFilter,       # keep requests with a given HTTP method (case-insensitive)
+    PathFilter,         # keep requests whose URL path matches a regex
+    TakeFilter,         # keep the first N (lazy, stops early)
+    SampleFilter,       # uniform random sample of N (reservoir; optional seed)
+)
+```
+
+Most modules just wire the **standard filter flags** (`--method` (repeatable),
+`--path`, `--sample`, `--sample-seed`) with two helpers, then return the result
+from `request_filters()`:
+
+```python
+import argparse
+from core.filters import add_filter_args, filters_from_args
+from modules.base import BaseModule
+
+class MyModule(BaseModule):
+    def __init__(self):
+        self._filters = []
+
+    def setup(self, args):
+        parser = argparse.ArgumentParser(prog="mymodule", add_help=False)
+        add_filter_args(parser)                    # registers the standard flags
+        parsed, _ = parser.parse_known_args(args)
+        self._filters = filters_from_args(parsed)  # -> list[RequestFilter]
+
+    def request_filters(self):
+        return self._filters
+
+    async def mutate(self, requests, context):
+        return requests
+```
+
+Now `leviosa reqs.json --module mymodule --method POST --sample 5` sends a random
+5 of the POST requests. `filters_from_args` orders selective filters (method,
+path) before sampling, so `--sample` draws from the already-narrowed set.
+
+Notes:
+
+- **New filters are just subclasses.** Per-request ones subclass `PredicateFilter`
+  and implement `keep()`; whole-stream ones subclass `RequestFilter` and
+  implement `apply()`. Instantiate them directly in `request_filters()` if you
+  don't want the standard flags.
+- **Filters run on the input seeds** (the requests handed to the module), not on
+  the module's expanded output. To cap your own output, apply a filter object by
+  hand inside `mutate()` — e.g. `return TakeFilter(100).apply(self._variants(...))`.
+- **`SampleFilter` is eager** (reservoir sampling drains its input) — fine for the
+  small seed set, but don't stack it on a huge expanded stream.
+- The standard flags are parsed from the shared arg tail, so if two active
+  modules both call `add_filter_args` they filter identically. A module needing
+  independent control should define its own flag names and build filters directly.
+
+See `modules/passthrough.py` for the reference wiring.
+
+---
+
 ## Module-specific CLI flags
 
 The main leviosa parser uses `parse_known_args`. Any flags it does not recognise are collected into a `remaining` list and passed as-is to every loaded module's `setup(remaining)`.
@@ -315,5 +384,6 @@ class ParamFuzzer(BaseModule):
 - [ ] Cross-response logic accumulates on `context.data` in `analyze_one` and emits in `finalize` (responses stream one at a time, in completion order)
 - [ ] `needs_body = False` set if only status/headers are inspected
 - [ ] `use_burp = True` set only if this module's (typically low-volume) traffic should be routed through burpsuite
+- [ ] Request filters (via `request_filters()`) wired if the module should sample or restrict its inputs — `add_filter_args`/`filters_from_args` for the standard `--method/--path/--sample` flags
 - [ ] Findings printed to stdout; prefix with `[MODULENAME]`
 - [ ] `status == 0` means a network error — handle or filter as appropriate

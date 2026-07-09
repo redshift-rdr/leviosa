@@ -16,9 +16,15 @@ async def run_modules(
     logger: TrafficLogger | None = None,
 ) -> None:
     for module in modules:
+        # Apply the module's request filters to a fresh view of the inputs before
+        # mutate() sees them (e.g. keep only POSTs, or a random sample). Filters
+        # compose in declared order; default is none.
+        seeds = requests_factory()
+        for request_filter in module.request_filters():
+            seeds = request_filter.apply(seeds)
         # mutate() returns a sync iterable (often a lazy generator); the engine
         # pulls it one request at a time, so nothing is fully materialised here.
-        mutated = await module.mutate(requests_factory(), context)
+        mutated = await module.mutate(seeds, context)
         # Proxy is resolved per module: a module that opts into burp routes
         # there, everything else follows --proxy / direct.
         proxy, proxy_auth = resolve_proxy(config, module.use_burp)
