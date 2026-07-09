@@ -33,7 +33,7 @@ class PathFuzzer(BaseModule):
         self._skip = StatusCodeAnalyser([0, 404])
         self._filters = []
 
-    def setup(self, args: list[str]) -> None:
+    def option_parser(self):
         parser = argparse.ArgumentParser(prog="pathfuzz", add_help=False)
         parser.add_argument("--wordlist", required=True, metavar="PATH",
                             help="Path to wordlist file (one entry per line)")
@@ -41,7 +41,10 @@ class PathFuzzer(BaseModule):
                             help="Placeholder in the URL to replace (default: FUZZ)")
         parser.add_argument("--recursive", action="store_true",
                             help="Fuzz every path depth level, not just the keyword position")
-        parsed, _ = parser.parse_known_args(args)
+        return parser
+
+    def setup(self, args: list[str]) -> None:
+        parsed, _ = self.option_parser().parse_known_args(args)
 
         with open(parsed.wordlist) as f:
             self._wordlist = [line.strip() for line in f if line.strip()]

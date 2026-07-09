@@ -21,6 +21,17 @@ class BaseModule(ABC):
     def setup(self, args: list[str]) -> None:
         """Called once with remaining CLI args after main parsing. Override to handle module-specific flags."""
 
+    def option_parser(self) -> "argparse.ArgumentParser | None":
+        """
+        Return an argparse parser (built with add_help=False) describing this
+        module's own CLI options, or None if it has none. setup() parses flags
+        with it and --list-modules introspects it to show the options.
+
+        Do NOT register the standard request-filter flags here — those are added
+        separately by parse_request_filters() and listed once globally.
+        """
+        return None
+
     def parse_request_filters(self, args: list[str]) -> None:
         """
         Parse the standard request-filter flags (--method / --path / --sample /

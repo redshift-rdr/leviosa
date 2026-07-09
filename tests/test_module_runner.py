@@ -116,6 +116,25 @@ def test_all_modules_wire_request_filters(name, tmp_path):
     assert SampleFilter in kinds
 
 
+@pytest.mark.parametrize("name", [
+    "passthrough", "pathfuzz", "adminfinder", "sensitivefiles",
+    "versiondisclosure", "errorpages",
+])
+def test_option_parser_is_parser_or_none(name):
+    import argparse
+
+    from core.loader import load_modules
+
+    module = load_modules([name])[0]
+    parser = module.option_parser()
+    assert parser is None or isinstance(parser, argparse.ArgumentParser)
+    # passthrough carries no module-specific options.
+    if name == "passthrough":
+        assert parser is None
+    else:
+        assert parser is not None
+
+
 # ---------------------------------------------------------------------------
 # run_modules integration tests (send() is patched with a fake async generator)
 # ---------------------------------------------------------------------------

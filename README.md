@@ -178,6 +178,13 @@ Modules are `.py` files in the `modules/` directory. Pass `--module <name>` (rep
 to load them at runtime. Module-specific flags are passed after the leviosa flags and
 are consumed by the module's own argument parser.
 
+Run `leviosa --list-modules` to see every available module, what it does and its
+command-line options (plus the standard request filters every module accepts):
+
+```bash
+leviosa --list-modules
+```
+
 ```bash
 # pathfuzz — keyword mode: replace FUZZ in the URL with each wordlist entry
 leviosa http://target.local/FUZZ --module pathfuzz --wordlist wordlists/common.txt

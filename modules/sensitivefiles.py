@@ -136,7 +136,7 @@ class SensitiveFiles(pathfuzz.PathFuzzer):
                 r"(?i)\b(CREATE TABLE|INSERT INTO|DROP TABLE)\b")),
         ]
 
-    def setup(self, args: list[str]) -> None:
+    def option_parser(self):
         parser = argparse.ArgumentParser(prog="sensitivefiles", add_help=False)
         parser.add_argument(
             "--sensitive-wordlist", metavar="PATH", default=None,
@@ -147,7 +147,10 @@ class SensitiveFiles(pathfuzz.PathFuzzer):
             "--sensitive-extra", metavar="PATH", default=None,
             help="Append the paths in this file on top of the built-in list",
         )
-        parsed, _ = parser.parse_known_args(args)
+        return parser
+
+    def setup(self, args: list[str]) -> None:
+        parsed, _ = self.option_parser().parse_known_args(args)
 
         if parsed.sensitive_wordlist:
             self._wordlist = self._read_paths(parsed.sensitive_wordlist)

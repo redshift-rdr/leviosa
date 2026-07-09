@@ -1,7 +1,33 @@
 import pytest
 
-from core.loader import load_modules
+from core.loader import discover_modules, load_modules
 from modules.base import BaseModule
+
+
+class TestDiscoverModules:
+    def test_finds_shipped_modules(self):
+        names = discover_modules()
+        for expected in (
+            "passthrough", "pathfuzz", "adminfinder",
+            "sensitivefiles", "versiondisclosure", "errorpages",
+        ):
+            assert expected in names
+
+    def test_excludes_base_and_init(self):
+        names = discover_modules()
+        assert "base" not in names
+        assert "__init__" not in names
+
+    def test_sorted(self):
+        names = discover_modules()
+        assert names == sorted(names)
+
+    def test_all_discovered_modules_load(self):
+        # Every discovered name must load into exactly one BaseModule instance.
+        for name in discover_modules():
+            instances = load_modules([name])
+            assert len(instances) == 1
+            assert isinstance(instances[0], BaseModule)
 
 VALID_MODULE_SRC = """\
 from modules.base import BaseModule

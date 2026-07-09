@@ -125,6 +125,29 @@ class TestCLIIntegration:
         assert "--concurrency" in stdout
         assert "--verbose" in stdout
 
+    def test_list_modules_no_target_needed(self):
+        # --list-modules exits cleanly without the required target positional.
+        result = self._run("--list-modules")
+        assert result.returncode == 0
+
+    def test_list_modules_shows_modules_and_descriptions(self):
+        stdout = self._run("--list-modules").stdout
+        assert "Available modules:" in stdout
+        # module names
+        for name in ("adminfinder", "errorpages", "versiondisclosure", "passthrough"):
+            assert name in stdout
+        # a description and a module-specific option
+        assert "Error-page hunter." in stdout
+        assert "--techniques" in stdout
+        # passthrough has no own options
+        assert "no module-specific options" in stdout
+
+    def test_list_modules_shows_standard_filters(self):
+        stdout = self._run("--list-modules").stdout
+        assert "standard request filters" in stdout
+        assert "--sample" in stdout
+        assert "--method" in stdout
+
     def test_runs_with_url(self):
         # One response line printed regardless of whether the connection succeeds
         result = self._run("http://example.com", "--no-proxy")

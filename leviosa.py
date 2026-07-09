@@ -1,7 +1,10 @@
 import argparse
 import asyncio
+import inspect
 import json
+import shutil
 import sys
+import textwrap
 from contextlib import aclosing
 
 from core.config import load_config
@@ -10,12 +13,84 @@ from core.cookies import (
     overrides_from_header_string,
     with_cookie_overrides,
 )
-from core.loader import load_modules
+from core.filters import add_filter_args
+from core.loader import discover_modules, load_modules
 from core.logdb import TrafficLogger
 from core.models import LeviosaContext
 from core.parsers import request_source
 from core.requester import resolve_proxy, send
 from core.runner import run_modules
+
+
+def _option_rows(parser: argparse.ArgumentParser) -> list[tuple[str, str]]:
+    """Extract (option-display, help) pairs from an argparse parser."""
+    rows = []
+    for action in parser._actions:
+        if not action.option_strings:  # skip positionals
+            continue
+        flags = ", ".join(action.option_strings)
+        # nargs == 0 means a flag that takes no value (store_true etc.).
+        metavar = "" if action.nargs == 0 else (action.metavar or action.dest.upper())
+        rows.append((f"{flags} {metavar}".strip(), action.help or ""))
+    return rows
+
+
+def _print_option_rows(rows: list[tuple[str, str]], indent: int) -> None:
+    """Print (left, help) rows aligned, wrapping help text to the terminal width."""
+    if not rows:
+        return
+    left_width = max(len(left) for left, _ in rows)
+    help_col = indent + left_width + 2
+    total = max(shutil.get_terminal_size((100, 24)).columns, 60)
+    avail = max(total - help_col, 20)
+    for left, help_text in rows:
+        wrapped = textwrap.wrap(help_text, avail) or [""]
+        print(f"{' ' * indent}{left.ljust(left_width)}  {wrapped[0]}")
+        for cont in wrapped[1:]:
+            print(f"{' ' * help_col}{cont}")
+
+
+def list_modules() -> None:
+    """Print every available module, its description and its CLI options."""
+    print("Available modules:\n")
+    for name in discover_modules():
+        try:
+            module = load_modules([name])[0]
+        except Exception as e:  # a broken module shouldn't sink the whole listing
+            print(f"  {name}")
+            print(f"      (failed to load: {e})\n")
+            continue
+
+        doc = inspect.getdoc(type(module)) or ""
+        summary = doc.split("\n\n", 1)[0].replace("\n", " ").strip() or "(no description)"
+        print(f"  {name}")
+        for line in textwrap.wrap(summary, 72):
+            print(f"      {line}")
+
+        parser = module.option_parser()
+        rows = _option_rows(parser) if parser is not None else []
+        if rows:
+            print("      options:")
+            _print_option_rows(rows, indent=8)
+        else:
+            print("      (no module-specific options)")
+        print()
+
+    filter_parser = argparse.ArgumentParser(add_help=False)
+    add_filter_args(filter_parser)
+    print("All modules also accept the standard request filters:")
+    _print_option_rows(_option_rows(filter_parser), indent=2)
+
+
+class _ListModulesAction(argparse.Action):
+    """Print the module listing and exit (like --help; no target required)."""
+
+    def __init__(self, option_strings, dest, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, default=argparse.SUPPRESS, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        list_modules()
+        parser.exit()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -34,6 +109,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="NAME",
         help="Module to run (repeatable). Loaded from modules/<name>.py",
+    )
+    parser.add_argument(
+        "--list-modules",
+        action=_ListModulesAction,
+        help="List available modules, their descriptions and options, then exit",
     )
     parser.add_argument(
         "--proxy",

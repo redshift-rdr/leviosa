@@ -104,7 +104,7 @@ class AdminFinder(pathfuzz.PathFuzzer):
             flags=re.IGNORECASE,
         )
 
-    def setup(self, args: list[str]) -> None:
+    def option_parser(self):
         parser = argparse.ArgumentParser(prog="adminfinder", add_help=False)
         parser.add_argument(
             "--admin-wordlist", metavar="PATH", default=None,
@@ -115,7 +115,10 @@ class AdminFinder(pathfuzz.PathFuzzer):
             "--admin-extra", metavar="PATH", default=None,
             help="Append the paths in this file on top of the built-in admin list",
         )
-        parsed, _ = parser.parse_known_args(args)
+        return parser
+
+    def setup(self, args: list[str]) -> None:
+        parsed, _ = self.option_parser().parse_known_args(args)
 
         if parsed.admin_wordlist:
             self._wordlist = self._read_paths(parsed.admin_wordlist)

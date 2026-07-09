@@ -111,7 +111,7 @@ class ErrorPages(BaseModule):
         # roughly the in-flight window rather than growing with the whole scan.
         self._techniques: dict[int, str] = {}
 
-    def setup(self, args: list[str]) -> None:
+    def option_parser(self):
         parser = argparse.ArgumentParser(prog="errorpages", add_help=False)
         parser.add_argument(
             "--techniques", metavar="LIST", default=None,
@@ -123,7 +123,10 @@ class ErrorPages(BaseModule):
             help="Length of the oversized path segment for the long-url technique "
                  "(default: 4096)",
         )
-        parsed, _ = parser.parse_known_args(args)
+        return parser
+
+    def setup(self, args: list[str]) -> None:
+        parsed, _ = self.option_parser().parse_known_args(args)
 
         if parsed.techniques:
             chosen = [t.strip() for t in parsed.techniques.split(",") if t.strip()]

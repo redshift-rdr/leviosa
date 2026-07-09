@@ -87,7 +87,7 @@ class VersionDisclosure(BaseModule):
         self._heuristic = True
         self._filters = []
 
-    def setup(self, args: list[str]) -> None:
+    def option_parser(self):
         parser = argparse.ArgumentParser(prog="versiondisclosure", add_help=False)
         parser.add_argument(
             "--extra-header", metavar="NAME", action="append", default=[],
@@ -98,7 +98,10 @@ class VersionDisclosure(BaseModule):
             help="Only report curated headers; skip the product/version scan of "
                  "other headers",
         )
-        parsed, _ = parser.parse_known_args(args)
+        return parser
+
+    def setup(self, args: list[str]) -> None:
+        parsed, _ = self.option_parser().parse_known_args(args)
 
         for name in parsed.extra_header:
             self._known.add(name.lower())

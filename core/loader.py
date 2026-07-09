@@ -5,6 +5,15 @@ from pathlib import Path
 from modules.base import BaseModule
 
 
+def discover_modules(modules_dir: str = "modules") -> list[str]:
+    """Return the sorted names of all loadable modules in modules_dir."""
+    directory = Path(modules_dir)
+    return sorted(
+        p.stem for p in directory.glob("*.py")
+        if p.stem not in ("__init__", "base")
+    )
+
+
 def load_modules(names: list[str], modules_dir: str = "modules") -> list[BaseModule]:
     instances = []
     for name in names:

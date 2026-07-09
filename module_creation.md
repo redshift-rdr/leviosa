@@ -200,18 +200,28 @@ See `modules/passthrough.py` for the reference wiring.
 
 The main leviosa parser uses `parse_known_args`. Any flags it does not recognise are collected into a `remaining` list and passed as-is to every loaded module's `setup(remaining)`.
 
-Inside `setup`, use `argparse` with `parse_known_args` so that flags belonging to other modules are silently ignored:
+Build the parser in `option_parser()` (with `add_help=False`) and let `setup()`
+parse with it. Keeping the parser in `option_parser()` means `--list-modules` can
+introspect and display your options without running `setup()`:
 
 ```python
-def setup(self, args: list[str]) -> None:
+def option_parser(self):
     parser = argparse.ArgumentParser(prog="mymodule", add_help=False)
-    parser.add_argument("--my-flag", required=True)
-    parser.add_argument("--optional", default="default_value")
-    parsed, _ = parser.parse_known_args(args)   # _ discards unknown flags
+    parser.add_argument("--my-flag", required=True, help="What it does")
+    parser.add_argument("--optional", default="default_value", help="...")
+    return parser
 
+def setup(self, args: list[str]) -> None:
+    parsed, _ = self.option_parser().parse_known_args(args)  # _ discards unknown flags
     self._my_flag = parsed.my_flag
     self._optional = parsed.optional
+    self.parse_request_filters(args)   # optional: enable the standard filters
 ```
+
+`parse_known_args` (not `parse_args`) lets flags belonging to other modules pass
+through silently. Give every argument a `help=` string — `--list-modules` shows
+it. A module with no options simply doesn't override `option_parser()` (the base
+returns `None`).
 
 CLI invocation example:
 
@@ -328,12 +338,15 @@ class ParamFuzzer(BaseModule):
         self._param_name: str | None = None
         self._analysers = []
 
-    def setup(self, args: list[str]) -> None:
+    def option_parser(self):
         parser = argparse.ArgumentParser(prog="paramfuzz", add_help=False)
-        parser.add_argument("--wordlist", required=True)
+        parser.add_argument("--wordlist", required=True, help="Wordlist file")
         parser.add_argument("--param", required=True, help="Param name to fuzz")
-        parser.add_argument("--match-text", default=None)
-        parsed, _ = parser.parse_known_args(args)
+        parser.add_argument("--match-text", default=None, help="Flag responses containing this text")
+        return parser
+
+    def setup(self, args: list[str]) -> None:
+        parsed, _ = self.option_parser().parse_known_args(args)
 
         with open(parsed.wordlist) as f:
             self._wordlist = [l.strip() for l in f if l.strip()]
@@ -342,6 +355,7 @@ class ParamFuzzer(BaseModule):
         self._analysers = [StatusCodeAnalyser([200, 500])]
         if parsed.match_text:
             self._analysers.append(TextMatchAnalyser(parsed.match_text, case_sensitive=False))
+        self.parse_request_filters(args)
 
     async def mutate(self, requests, context):
         if self._wordlist is None:
@@ -384,7 +398,7 @@ class ParamFuzzer(BaseModule):
 - [ ] File is at `modules/<name>.py`
 - [ ] Exactly one class inheriting `BaseModule`
 - [ ] `mutate` is implemented (even if it just returns `requests`) and returns a **sync iterable** — a list or a lazy generator, never an async generator
-- [ ] `setup` uses `parse_known_args` (not `parse_args`) to ignore other modules' flags
+- [ ] CLI options built in `option_parser()` (so `--list-modules` can show them), parsed in `setup` with `parse_known_args` (not `parse_args`); every argument has a `help=` string
 - [ ] Missing required flags raise `RuntimeError` with a usage hint
 - [ ] Copying variants: `dataclasses.replace(req, url=...)` for **url-only** mutation; `copy.deepcopy(req)` when mutating `params`/headers
 - [ ] Cross-response logic accumulates on `context.data` in `analyze_one` and emits in `finalize` (responses stream one at a time, in completion order)

@@ -53,4 +53,7 @@ No build system or test suite exists yet. Once the entry point is created, the e
 
 ```bash
 python leviosa.py <url|url-list|requests.json> [--module <name>] [--proxy URL] [--no-proxy] [--log-db PATH] [--no-log] [--follow-redirects]
+
+# List available modules, their descriptions and options:
+python leviosa.py --list-modules
 ```
