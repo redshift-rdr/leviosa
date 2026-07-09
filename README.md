@@ -157,10 +157,24 @@ leviosa "http://target.local/api/INJECT/data" \
 leviosa http://target.local/home/next \
     --module pathfuzz --wordlist wordlists/common.txt --recursive
 
+# versiondisclosure — passively fingerprint software/versions from response headers
+#   reports curated disclosing headers (Server, X-Powered-By, X-AspNet-Version, …)
+#   plus any other header whose value carries a product/version token (Foo/1.2.3)
+leviosa requests.json --module versiondisclosure
+
+# versiondisclosure — add a custom header name; curated-only (no heuristic scan)
+leviosa http://target.local --module versiondisclosure \
+    --extra-header X-My-Version --no-heuristic
+
 # Chain multiple modules (each receives the original requests; context is shared)
 leviosa requests.json --module pathfuzz --module passthrough \
     --wordlist wordlists/common.txt
 ```
+
+The `versiondisclosure` module sends requests unchanged and inspects only
+response headers (no bodies downloaded). Each response with a disclosure is
+reported as it arrives, and a deduplicated inventory of every distinct
+`Header: value` — effectively a technology-stack summary — is printed at the end.
 
 ### writing a module
 
