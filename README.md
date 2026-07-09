@@ -10,7 +10,8 @@
 - a core async web request component which streams requests concurrently
 - can take in a URL, a list of URLs, or a JSON file of HTTP requests
 - can specify 'modules' which are loaded in at runtime. modules perform some action/mutation on the http requests provided to it, then use the web request component to send the requests, then can optionally perform some action/analysis on the responses
-- runs through burpsuite by default, with a --no-proxy to turn it off
+- sends traffic **direct by default**. burpsuite is opt-in per module (`use_burp`), so high-volume scans don't bloat the `.burp` file. a `--proxy` flag routes non-burp traffic through any proxy (credentials supported), and `--no-proxy` forces everything direct.
+- **logs all traffic** (every request/response) to a local sqlite db, so traffic that bypasses burp is still recorded for the engagement. path is configurable (`--log-db`, default `leviosa.db`); disable with `--no-log`.
 - emphasis on lightweight. the core should be lightweight, no bloat and unnecesary features. functionality should be added in modules.
 
 ### memory efficiency (streaming)
@@ -41,20 +42,54 @@ pip install --no-index --find-links=./bundled_requirements aiohttp
 ### usage
 
 ```bash
-# Single URL (raw dispatch, no module)
-leviosa http://target.local/path --no-proxy
+# Single URL (raw dispatch, no module) — sent direct
+leviosa http://target.local/path
 
 # List of URLs (one per line)
-leviosa urls.txt --no-proxy
+leviosa urls.txt
 
 # JSON file of HTTP request objects
-leviosa requests.json --no-proxy
+leviosa requests.json
 
-# Verbose output (proxy, target, module names go to stderr)
-leviosa http://target.local --no-proxy --verbose
+# Verbose output (proxy, traffic log, target, module names go to stderr)
+leviosa http://target.local --verbose
 
 # Cap response body reads at 64 KB (0 = unlimited; default 1 MB)
-leviosa requests.json --no-proxy --max-body-bytes 65536
+leviosa requests.json --max-body-bytes 65536
+```
+
+#### proxying
+
+By default nothing is proxied. Modules opt into burpsuite individually (via the
+`use_burp` class attribute), so only the traffic you care to inspect ends up in
+burp. Everything else is sent direct — or through a proxy of your choosing.
+
+```bash
+# Route non-burp traffic through a proxy (credentials optional)
+leviosa requests.json --proxy http://127.0.0.1:8081
+leviosa requests.json --proxy http://user:pass@127.0.0.1:8081
+
+# Force everything direct, overriding both per-module burp opt-in and --proxy
+leviosa requests.json --no-proxy
+```
+
+Precedence per request: `--no-proxy` (direct) > module `use_burp` (burp) >
+`--proxy` (custom proxy) > direct. Credentials in a `--proxy` URL are sent as
+proxy auth and are **not** written to the traffic log.
+
+#### traffic logging
+
+Every request/response the tool sends is recorded in a local sqlite db — even
+traffic that bypasses burp — so the full engagement is captured. The `traffic`
+table stores timestamp, module, proxy used, method, url, request headers/params,
+status, response headers, response body, and an error flag.
+
+```bash
+# Custom log path (default: leviosa.db in the current directory)
+leviosa requests.json --log-db engagement.db
+
+# Disable logging entirely
+leviosa requests.json --no-log
 ```
 
 #### refreshing timed-out session cookies
@@ -65,10 +100,10 @@ the input file:
 
 ```bash
 # Paste a fresh Cookie header (e.g. copied from browser devtools)
-leviosa requests.json --no-proxy --cookies "session=NEW; csrf=NEW"
+leviosa requests.json --cookies "session=NEW; csrf=NEW"
 
 # ...or pull fresh cookies from a freshly captured request file
-leviosa requests.json --no-proxy --cookie-from fresh_capture.json
+leviosa requests.json --cookie-from fresh_capture.json
 ```
 
 Both replace matching cookies wherever they appear in the captured request — the
@@ -82,6 +117,13 @@ cookies and everything else untouched. Only cookies already present are replaced
 CLI flags always win over the TOML file. Relevant blocks:
 
 ```toml
+[burp]
+host = "127.0.0.1"  # burp endpoint used by modules that opt in via use_burp
+port = 8080
+
+[proxy]
+url = "http://user:pass@127.0.0.1:8081"  # proxy for non-burp traffic (== --proxy)
+
 [concurrency]
 limit = 20          # max requests in flight (== --concurrency)
 
@@ -90,6 +132,10 @@ max_bytes = 1048576 # response-body read cap in bytes, 0 = unlimited (== --max-b
 
 [request]
 timeout = 30        # per-request total timeout in seconds
+
+[log]
+enabled = true      # write the sqlite traffic log (== --no-log to disable)
+path = "leviosa.db" # traffic log path (== --log-db)
 ```
 
 ### modules
@@ -100,19 +146,19 @@ are consumed by the module's own argument parser.
 
 ```bash
 # pathfuzz — keyword mode: replace FUZZ in the URL with each wordlist entry
-leviosa http://target.local/FUZZ --no-proxy --module pathfuzz --wordlist wordlists/common.txt
+leviosa http://target.local/FUZZ --module pathfuzz --wordlist wordlists/common.txt
 
 # pathfuzz — custom keyword
-leviosa "http://target.local/api/INJECT/data" --no-proxy \
+leviosa "http://target.local/api/INJECT/data" \
     --module pathfuzz --wordlist wordlists/common.txt --keyword INJECT
 
 # pathfuzz — recursive mode: fuzz every path depth level
 #   given /home/next, generates /word/, /home/word/, /home/next/word/, …
-leviosa http://target.local/home/next --no-proxy \
+leviosa http://target.local/home/next \
     --module pathfuzz --wordlist wordlists/common.txt --recursive
 
 # Chain multiple modules (each receives the original requests; context is shared)
-leviosa requests.json --no-proxy --module pathfuzz --module passthrough \
+leviosa requests.json --module pathfuzz --module passthrough \
     --wordlist wordlists/common.txt
 ```
 
@@ -127,6 +173,10 @@ class MyModule(BaseModule):
     # Set False if you only need the status code — the engine then skips
     # reading response bodies entirely (resp.body will be b"").
     needs_body = True
+
+    # Set True to route this module's traffic through burpsuite. Default False:
+    # traffic goes direct (or through --proxy). All traffic is logged either way.
+    use_burp = False
 
     def setup(self, args: list[str]) -> None:
         # parse module-specific CLI args here (optional)

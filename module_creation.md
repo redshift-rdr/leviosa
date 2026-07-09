@@ -63,6 +63,12 @@ class BaseModule(ABC):
     # modules cheap and avoiding downloading large artefacts. Default True.
     needs_body: bool = True
 
+    # Whether this module's traffic is routed through burpsuite. Default False:
+    # burp is opt-in per module, so high-volume scans don't bloat the .burp file.
+    # When False, traffic uses --proxy if set, else goes direct. Either way every
+    # request/response is recorded in the sqlite traffic log.
+    use_burp: bool = False
+
     def setup(self, args: list[str]) -> None:
         """
         Called once before mutate/analyze, with any CLI args not consumed by
@@ -111,6 +117,7 @@ class BaseModule(ABC):
 - **`analyze_one` output goes to stdout.** Use `print()`. Prefix lines with `[MODULENAME]` by convention.
 - **Responses stream in completion order, one at a time.** `analyze_one` never sees the whole list. To compare across responses (baseline, counts, diffs) accumulate on `context.data` during `analyze_one`, then act in `finalize`.
 - **Set `needs_body = False`** if you only inspect status/headers — the engine then never reads the body (`response.body` is `b""`). With the default `needs_body = True`, bodies are read up to `config.max_body_bytes` (the `--max-body-bytes` cap, default 1 MB), so a very large body may be truncated.
+- **Set `use_burp = True`** to route this module's traffic through burpsuite. Default `False` sends it direct (or through `--proxy`). Reserve burp for low-volume modules whose traffic you want to inspect manually — high-volume fuzzers left on burp bloat the `.burp` file. Regardless of this setting, every request/response is recorded in the sqlite traffic log, and `--no-proxy` overrides `use_burp` to force direct.
 
 ---
 
@@ -307,5 +314,6 @@ class ParamFuzzer(BaseModule):
 - [ ] Copying variants: `dataclasses.replace(req, url=...)` for **url-only** mutation; `copy.deepcopy(req)` when mutating `params`/headers
 - [ ] Cross-response logic accumulates on `context.data` in `analyze_one` and emits in `finalize` (responses stream one at a time, in completion order)
 - [ ] `needs_body = False` set if only status/headers are inspected
+- [ ] `use_burp = True` set only if this module's (typically low-volume) traffic should be routed through burpsuite
 - [ ] Findings printed to stdout; prefix with `[MODULENAME]`
 - [ ] `status == 0` means a network error — handle or filter as appropriate

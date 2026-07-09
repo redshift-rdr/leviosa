@@ -10,6 +10,12 @@ class BaseModule(ABC):
     # and avoiding downloading large artefacts.
     needs_body: bool = True
 
+    # Whether this module's traffic should be routed through the burp proxy.
+    # Default False: burp is opt-in per module now, since high-volume scans
+    # bloat the .burp file. When False the module uses --proxy if set, else goes
+    # direct. All traffic is recorded in the sqlite log regardless.
+    use_burp: bool = False
+
     def setup(self, args: list[str]) -> None:
         """Called once with remaining CLI args after main parsing. Override to handle module-specific flags."""
 

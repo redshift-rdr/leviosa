@@ -22,6 +22,28 @@ class TestParser:
         args = build_parser().parse_args(["http://example.com"])
         assert args.no_proxy is False
 
+    def test_proxy_flag(self):
+        args = build_parser().parse_args(
+            ["http://example.com", "--proxy", "http://user:pass@127.0.0.1:8081"]
+        )
+        assert args.proxy == "http://user:pass@127.0.0.1:8081"
+
+    def test_proxy_defaults_none(self):
+        args = build_parser().parse_args(["http://example.com"])
+        assert args.proxy is None
+
+    def test_log_db_flag(self):
+        args = build_parser().parse_args(["http://example.com", "--log-db", "/tmp/run.db"])
+        assert args.log_db == "/tmp/run.db"
+
+    def test_no_log_flag(self):
+        args = build_parser().parse_args(["http://example.com", "--no-log"])
+        assert args.no_log is True
+
+    def test_no_log_defaults_false(self):
+        args = build_parser().parse_args(["http://example.com"])
+        assert args.no_log is False
+
     def test_concurrency_override(self):
         args = build_parser().parse_args(["http://example.com", "--concurrency", "5"])
         assert args.concurrency == 5
@@ -75,7 +97,7 @@ class TestParser:
 class TestCLIIntegration:
     def _run(self, *args):
         return subprocess.run(
-            [sys.executable, "leviosa.py", *args],
+            [sys.executable, "leviosa.py", "--no-log", *args],
             capture_output=True,
             text=True,
             cwd=PROJECT_ROOT,
@@ -128,17 +150,21 @@ class TestCLIIntegration:
         assert "proxy" in result.stderr
         assert "disabled" in result.stderr
 
-    def test_verbose_shows_proxy_address_when_enabled(self):
-        # Even if the proxy isn't reachable, the verbose line should appear
-        result = self._run("http://x.com", "--verbose")
+    def test_verbose_shows_custom_proxy_when_set(self):
+        # Even if the proxy isn't reachable, the verbose line should show its URL.
+        result = self._run("http://x.com", "--verbose", "--proxy", "http://127.0.0.1:8081")
         assert "proxy" in result.stderr
-        assert "8080" in result.stderr
+        assert "8081" in result.stderr
+
+    def test_verbose_shows_traffic_log_line(self):
+        result = self._run("http://x.com", "--verbose")
+        assert "traffic log" in result.stderr
 
 
 class TestErrorHandling:
     def _run(self, *args):
         return subprocess.run(
-            [sys.executable, "leviosa.py", *args],
+            [sys.executable, "leviosa.py", "--no-log", *args],
             capture_output=True,
             text=True,
             cwd=PROJECT_ROOT,

@@ -1,6 +1,7 @@
 import asyncio
 import sys
 from collections.abc import AsyncIterator, Iterable
+from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 
@@ -11,7 +12,44 @@ http.cookies._is_legal_key = lambda key: bool(key) and not any(
 )
 
 from core.config import Config
+from core.logdb import TrafficLogger
 from core.models import LeviosaRequest, LeviosaResponse, Param
+
+
+def resolve_proxy(
+    config: Config, use_burp: bool
+) -> tuple[str | None, aiohttp.BasicAuth | None]:
+    """
+    Decide the proxy for a batch of traffic. Precedence:
+
+    1. --no-proxy forces every request direct.
+    2. A module that opts in (use_burp=True) routes through the burp endpoint.
+    3. Otherwise --proxy (config.proxy_url), if set, is used.
+    4. Otherwise the request goes direct.
+
+    Returns (proxy_url, proxy_auth). Any credentials embedded in --proxy are
+    split into a BasicAuth object and stripped from the returned URL, so the
+    URL is safe to log.
+    """
+    if config.no_proxy:
+        return None, None
+    if use_burp:
+        return f"http://{config.burp_host}:{config.burp_port}", None
+    if config.proxy_url:
+        return _split_proxy_auth(config.proxy_url)
+    return None, None
+
+
+def _split_proxy_auth(url: str) -> tuple[str, aiohttp.BasicAuth | None]:
+    parts = urlsplit(url)
+    if not (parts.username or parts.password):
+        return url, None
+    auth = aiohttp.BasicAuth(parts.username or "", parts.password or "")
+    netloc = parts.hostname or ""
+    if parts.port:
+        netloc = f"{netloc}:{parts.port}"
+    clean = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    return clean, auth
 
 
 def _parse_headers(raw_headers: list[str]) -> dict[str, str]:
@@ -82,8 +120,9 @@ async def _send_one(
     request: LeviosaRequest,
     config: Config,
     read_body: bool,
+    proxy: str | None,
+    proxy_auth: aiohttp.BasicAuth | None,
 ) -> LeviosaResponse:
-    proxy = f"http://{config.proxy_host}:{config.proxy_port}" if config.proxy_enabled else None
     headers = _parse_headers(request.headers)
     kwargs, extra_headers = _build_kwargs(request.params)
     headers.update(extra_headers)
@@ -93,6 +132,7 @@ async def _send_one(
             url=request.url,
             headers=headers,
             proxy=proxy,
+            proxy_auth=proxy_auth,
             **kwargs,
         ) as resp:
             body = await _read_capped(resp, config.max_body_bytes) if read_body else b""
@@ -115,6 +155,11 @@ async def send(
     requests: Iterable[LeviosaRequest],
     config: Config,
     read_body: bool = True,
+    *,
+    proxy: str | None = None,
+    proxy_auth: aiohttp.BasicAuth | None = None,
+    logger: TrafficLogger | None = None,
+    module: str | None = None,
 ) -> AsyncIterator[LeviosaResponse]:
     """
     Send requests and yield each LeviosaResponse as it completes.
@@ -127,9 +172,19 @@ async def send(
     Only this coroutine touches the request iterator and the in-flight task set,
     so there is no cross-task sharing, no sentinel bookkeeping, and StopIteration
     is caught locally (PEP 479 safe).
+
+    `proxy`/`proxy_auth` are applied to every request (resolve_proxy decides
+    them per batch). If `logger` is given, every completed response is written to
+    the sqlite traffic log — this is the one choke point all traffic passes
+    through, so traffic that bypasses burp is still recorded.
     """
     timeout = aiohttp.ClientTimeout(total=config.timeout)
     connector = aiohttp.TCPConnector(ssl=False, limit=config.concurrency)
+
+    def _spawn(req: LeviosaRequest) -> asyncio.Task:
+        return asyncio.create_task(
+            _send_one(session, req, config, read_body, proxy, proxy_auth)
+        )
 
     req_iter = iter(requests)
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
@@ -141,23 +196,24 @@ async def send(
                     req = next(req_iter)
                 except StopIteration:
                     break
-                inflight.add(asyncio.create_task(_send_one(session, req, config, read_body)))
+                inflight.add(_spawn(req))
 
             while inflight:
                 done, inflight = await asyncio.wait(
                     inflight, return_when=asyncio.FIRST_COMPLETED
                 )
                 for t in done:
-                    yield t.result()
+                    resp = t.result()
+                    if logger is not None:
+                        logger.log(resp, module=module, proxy=proxy)
+                    yield resp
                 # Refill one slot per completed task.
                 for _ in range(len(done)):
                     try:
                         req = next(req_iter)
                     except StopIteration:
                         break
-                    inflight.add(
-                        asyncio.create_task(_send_one(session, req, config, read_body))
-                    )
+                    inflight.add(_spawn(req))
         finally:
             # Deterministic cleanup: cancel any in-flight tasks before the
             # session closes so an early break / exception / Ctrl-C in the

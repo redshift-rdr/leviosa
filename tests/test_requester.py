@@ -7,7 +7,68 @@ from aioresponses import CallbackResult, aioresponses
 
 from core.config import Config
 from core.models import LeviosaRequest, Param
-from core.requester import _build_kwargs, _parse_headers, send
+from core.requester import (
+    _build_kwargs,
+    _parse_headers,
+    _split_proxy_auth,
+    resolve_proxy,
+    send,
+)
+
+
+# ---------------------------------------------------------------------------
+# resolve_proxy / _split_proxy_auth unit tests
+# ---------------------------------------------------------------------------
+
+class TestResolveProxy:
+    def test_default_is_direct(self):
+        assert resolve_proxy(Config(), use_burp=False) == (None, None)
+
+    def test_use_burp_routes_to_burp_endpoint(self):
+        c = Config(burp_host="127.0.0.1", burp_port=8080)
+        url, auth = resolve_proxy(c, use_burp=True)
+        assert url == "http://127.0.0.1:8080"
+        assert auth is None
+
+    def test_custom_proxy_used_for_non_burp(self):
+        c = Config(proxy_url="http://127.0.0.1:8081")
+        url, auth = resolve_proxy(c, use_burp=False)
+        assert url == "http://127.0.0.1:8081"
+        assert auth is None
+
+    def test_burp_opt_in_beats_custom_proxy(self):
+        c = Config(proxy_url="http://127.0.0.1:8081")
+        url, _ = resolve_proxy(c, use_burp=True)
+        assert url == "http://127.0.0.1:8080"
+
+    def test_no_proxy_overrides_burp(self):
+        c = Config(no_proxy=True)
+        assert resolve_proxy(c, use_burp=True) == (None, None)
+
+    def test_no_proxy_overrides_custom(self):
+        c = Config(no_proxy=True, proxy_url="http://127.0.0.1:8081")
+        assert resolve_proxy(c, use_burp=False) == (None, None)
+
+    def test_custom_proxy_credentials_split_out(self):
+        c = Config(proxy_url="http://user:pass@127.0.0.1:8081")
+        url, auth = resolve_proxy(c, use_burp=False)
+        # Credentials are stripped from the URL (so it is safe to log) and
+        # returned as BasicAuth.
+        assert url == "http://127.0.0.1:8081"
+        assert auth == aiohttp.BasicAuth("user", "pass")
+
+
+class TestSplitProxyAuth:
+    def test_no_credentials(self):
+        assert _split_proxy_auth("http://127.0.0.1:8081") == (
+            "http://127.0.0.1:8081",
+            None,
+        )
+
+    def test_with_credentials(self):
+        url, auth = _split_proxy_auth("http://user:pass@host:9000")
+        assert url == "http://host:9000"
+        assert auth == aiohttp.BasicAuth("user", "pass")
 
 
 async def collect(requests, config, read_body=True):
@@ -26,9 +87,7 @@ def make_request(url="http://example.com", method="GET", params=None, headers=No
 
 @pytest.fixture
 def cfg():
-    c = Config()
-    c.proxy_enabled = False
-    return c
+    return Config()
 
 
 # ---------------------------------------------------------------------------
@@ -241,14 +300,15 @@ class TestSend:
 
         assert max_in_flight <= 3
 
-    async def test_proxy_enabled_does_not_raise(self):
+    async def test_proxy_passed_does_not_raise(self):
         config = Config()
-        config.proxy_enabled = True
-        config.proxy_host = "127.0.0.1"
-        config.proxy_port = 8080
         with aioresponses() as m:
             m.get("http://example.com", status=200, body=b"")
-            responses = await collect([make_request()], config)
+            responses = [
+                r async for r in send(
+                    [make_request()], config, proxy="http://127.0.0.1:8080"
+                )
+            ]
         assert responses[0].status == 200
 
     async def test_header_from_request_sent(self, cfg):

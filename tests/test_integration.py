@@ -24,7 +24,7 @@ def _fake_response(url: str, status: int) -> LeviosaResponse:
 
 def gen_send(responses=None, captured=None):
     """A fake core.requester.send: consumes the request iterable, yields responses."""
-    async def fake_send(reqs, config, read_body=True):
+    async def fake_send(reqs, config, read_body=True, **kwargs):
         consumed = list(reqs)
         if captured is not None:
             captured.extend(consumed)
@@ -50,7 +50,7 @@ class TestPathFuzzEndToEnd:
         modules[0].setup(["--wordlist", str(wordlist)])
 
         config = Config()
-        config.proxy_enabled = False
+        config.no_proxy = True
 
         fake_responses = [
             _fake_response("http://example.com/admin", 200),
@@ -80,7 +80,7 @@ class TestPathFuzzEndToEnd:
         modules[0].setup(["--wordlist", str(wordlist), "--recursive"])
 
         config = Config()
-        config.proxy_enabled = False
+        config.no_proxy = True
 
         fake_responses = [
             _fake_response("http://target.local/admin/", 200),
@@ -109,7 +109,7 @@ class TestPathFuzzEndToEnd:
         modules[0].setup(["--wordlist", str(wordlist)])
 
         config = Config()
-        config.proxy_enabled = False
+        config.no_proxy = True
 
         captured = []
         with patch("core.runner.send", gen_send(captured=captured)):
@@ -142,7 +142,7 @@ class TestPathFuzzEndToEnd:
         modules[0].setup(["--wordlist", str(wordlist)])
 
         config = Config()
-        config.proxy_enabled = False
+        config.no_proxy = True
 
         with patch("core.runner.send", gen_send(responses=[_fake_response("http://example.com/admin", 200)])):
             await run_modules(modules, source, config, LeviosaContext())
@@ -161,7 +161,7 @@ class TestPathFuzzEndToEnd:
         modules[0].setup(["--wordlist", str(wordlist)])
 
         config = Config()
-        config.proxy_enabled = False
+        config.no_proxy = True
 
         fake_responses = [
             _fake_response("http://example.com/missing", 404),

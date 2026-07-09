@@ -13,7 +13,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **CLI entry point**: accepts a single URL, a list of URLs, or a JSON file of HTTP request objects
 - **Core request component**: threaded HTTP request sender — the only non-module functionality
 - **Module system**: modules are loaded at runtime; each module (1) optionally mutates the incoming requests, (2) sends them via the core request component, and (3) optionally analyzes/acts on responses
-- **Proxy**: routes through BurpSuite by default; `--no-proxy` flag disables it
+- **Proxy**: traffic is direct by default. BurpSuite is opt-in per module via the `use_burp` class attribute (kept off by default so high-volume scans don't bloat the `.burp` file). `--proxy URL` routes non-burp traffic through any proxy (credentials supported, split into `aiohttp.BasicAuth` by `resolve_proxy` and stripped from the returned URL). `--no-proxy` forces everything direct, overriding both `use_burp` and `--proxy`. Precedence: `--no-proxy` > `use_burp` > `--proxy` > direct, computed by `core.requester.resolve_proxy` and threaded into `send(..., proxy=, proxy_auth=)`.
+- **Traffic logging**: `core.logdb.TrafficLogger` writes every request/response to a local sqlite db (`traffic` table) inside `send()` — the single choke point all traffic passes through — so traffic bypassing burp is still recorded. Path via `--log-db` (default `leviosa.db`); disable with `--no-log`.
 - **Design constraint**: keep the core minimal — all scan-specific logic belongs in modules
 
 ### JSON Input File Schema
@@ -50,5 +51,5 @@ pip install -e ".[dev]"
 No build system or test suite exists yet. Once the entry point is created, the expected invocation is:
 
 ```bash
-python leviosa.py <url|url-list|requests.json> [--module <name>] [--no-proxy]
+python leviosa.py <url|url-list|requests.json> [--module <name>] [--proxy URL] [--no-proxy] [--log-db PATH] [--no-log]
 ```

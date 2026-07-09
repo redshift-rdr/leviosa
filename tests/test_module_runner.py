@@ -26,9 +26,10 @@ def fake_send_factory(captured=None, responses=None, recorded=None):
     into `captured` if given — then yields either a preset `responses` list or
     one 200 response per request. `recorded` receives the read_body flag.
     """
-    async def fake_send(reqs, config, read_body=True):
+    async def fake_send(reqs, config, read_body=True, **kwargs):
         if recorded is not None:
             recorded["read_body"] = read_body
+            recorded.update(kwargs)
         consumed = list(reqs)
         if captured is not None:
             captured.extend(consumed)
@@ -43,9 +44,7 @@ def fake_send_factory(captured=None, responses=None, recorded=None):
 
 @pytest.fixture
 def cfg():
-    c = Config()
-    c.proxy_enabled = False
-    return c
+    return Config()
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +68,12 @@ class TestPassthroughModule:
     async def test_mutate_empty_list(self):
         result = await PassthroughModule().mutate([], LeviosaContext())
         assert result == []
+
+    def test_passthrough_opts_into_burp(self):
+        assert PassthroughModule.use_burp is True
+
+    def test_base_module_defaults_to_no_burp(self):
+        assert BaseModule.use_burp is False
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +239,48 @@ class TestRunModules:
 
         assert recorded["read_body"] is True
 
+    async def test_burp_module_routes_through_burp(self, cfg):
+        recorded = {}
+
+        class BurpMod(BaseModule):
+            use_burp = True
+
+            async def mutate(self, requests, context):
+                return requests
+
+        with patch("core.runner.send", fake_send_factory(recorded=recorded)):
+            await run_modules([BurpMod()], lambda: iter([make_request()]), cfg, LeviosaContext())
+
+        assert recorded["proxy"] == f"http://{cfg.burp_host}:{cfg.burp_port}"
+
+    async def test_non_burp_module_goes_direct_by_default(self, cfg):
+        recorded = {}
+
+        class DirectMod(BaseModule):
+            async def mutate(self, requests, context):
+                return requests
+
+        with patch("core.runner.send", fake_send_factory(recorded=recorded)):
+            await run_modules([DirectMod()], lambda: iter([make_request()]), cfg, LeviosaContext())
+
+        assert recorded["proxy"] is None
+
+    async def test_module_name_and_logger_forwarded(self, cfg):
+        recorded = {}
+        sentinel = object()
+
+        class NamedMod(BaseModule):
+            async def mutate(self, requests, context):
+                return requests
+
+        with patch("core.runner.send", fake_send_factory(recorded=recorded)):
+            await run_modules(
+                [NamedMod()], lambda: iter([make_request()]), cfg, LeviosaContext(), sentinel
+            )
+
+        assert recorded["module"] == "NamedMod"
+        assert recorded["logger"] is sentinel
+
     async def test_context_shared_across_modules(self, cfg):
         class WriterModule(BaseModule):
             async def mutate(self, requests, context):
@@ -284,7 +331,7 @@ class TestRunModules:
     async def test_empty_modules_list_does_nothing(self, cfg):
         called = {"n": 0}
 
-        async def fake_send(reqs, config, read_body=True):
+        async def fake_send(reqs, config, read_body=True, **kwargs):
             called["n"] += 1
             for r in reqs:
                 yield make_response(r.url)

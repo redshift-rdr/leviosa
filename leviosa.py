@@ -11,9 +11,10 @@ from core.cookies import (
     with_cookie_overrides,
 )
 from core.loader import load_modules
+from core.logdb import TrafficLogger
 from core.models import LeviosaContext
 from core.parsers import request_source
-from core.requester import send
+from core.requester import resolve_proxy, send
 from core.runner import run_modules
 
 
@@ -35,9 +36,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Module to run (repeatable). Loaded from modules/<name>.py",
     )
     parser.add_argument(
+        "--proxy",
+        metavar="URL",
+        help="Route non-burp traffic through this proxy, credentials optional, "
+             "e.g. --proxy http://user:pass@127.0.0.1:8081",
+    )
+    parser.add_argument(
         "--no-proxy",
         action="store_true",
-        help="Disable BurpSuite proxy (default: 127.0.0.1:8080)",
+        help="Force all traffic direct, overriding per-module burp opt-in and --proxy",
+    )
+    parser.add_argument(
+        "--log-db",
+        metavar="PATH",
+        help="SQLite file for the traffic log (default: leviosa.db)",
+    )
+    parser.add_argument(
+        "--no-log",
+        action="store_true",
+        help="Disable the sqlite traffic log",
     )
     parser.add_argument(
         "--concurrency",
@@ -76,8 +93,14 @@ def main():
     args, remaining = parser.parse_known_args()
 
     config = load_config()
+    if args.proxy is not None:
+        config.proxy_url = args.proxy
     if args.no_proxy:
-        config.proxy_enabled = False
+        config.no_proxy = True
+    if args.log_db is not None:
+        config.log_db_path = args.log_db
+    if args.no_log:
+        config.log_enabled = False
     if args.concurrency is not None:
         config.concurrency = args.concurrency
     if args.max_body_bytes is not None:
@@ -88,10 +111,15 @@ def main():
         config.verbose = True
 
     if config.verbose:
-        proxy_info = (
-            f"{config.proxy_host}:{config.proxy_port}" if config.proxy_enabled else "disabled"
-        )
+        if config.no_proxy:
+            proxy_info = "disabled (all traffic direct)"
+        elif config.proxy_url:
+            proxy_info = f"{config.proxy_url} (non-burp traffic)"
+        else:
+            proxy_info = "direct (burp per-module opt-in only)"
         print(f"[leviosa] proxy: {proxy_info}", file=sys.stderr)
+        log_info = config.log_db_path if config.log_enabled else "disabled"
+        print(f"[leviosa] traffic log: {log_info}", file=sys.stderr)
 
     try:
         source = request_source(args.target)
@@ -129,41 +157,59 @@ def main():
         if config.modules:
             print(f"[leviosa] modules: {', '.join(config.modules)}", file=sys.stderr)
 
-    if config.modules:
-        try:
-            modules = load_modules(config.modules)
-        except FileNotFoundError as e:
-            print(f"error: {e}", file=sys.stderr)
-            sys.exit(1)
-        except ValueError as e:
-            print(f"error: {e}", file=sys.stderr)
-            sys.exit(1)
+    # The traffic log captures every request/response, including traffic that
+    # bypasses burp, so the whole engagement is recorded locally.
+    logger = TrafficLogger(config.log_db_path) if config.log_enabled else None
+    try:
+        if config.modules:
+            try:
+                modules = load_modules(config.modules)
+            except FileNotFoundError as e:
+                print(f"error: {e}", file=sys.stderr)
+                sys.exit(1)
+            except ValueError as e:
+                print(f"error: {e}", file=sys.stderr)
+                sys.exit(1)
 
-        for mod in modules:
-            mod.setup(remaining)
+            for mod in modules:
+                mod.setup(remaining)
 
-        context = LeviosaContext()
-        try:
-            asyncio.run(run_modules(modules, source, config, context))
-        except KeyboardInterrupt:
-            print("\n[leviosa] interrupted.", file=sys.stderr)
-            sys.exit(130)
-        except RuntimeError as e:
-            print(f"error: {e}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        # Raw dispatch: stream statuses as they complete. read_body=False since
-        # we only print the status line, so no body is ever downloaded.
-        async def _raw():
-            async with aclosing(send(source(), config, read_body=False)) as stream:
-                async for resp in stream:
-                    print(f"{resp.status} {resp.request.method} {resp.request.url}")
+            context = LeviosaContext()
+            try:
+                asyncio.run(run_modules(modules, source, config, context, logger))
+            except KeyboardInterrupt:
+                print("\n[leviosa] interrupted.", file=sys.stderr)
+                sys.exit(130)
+            except RuntimeError as e:
+                print(f"error: {e}", file=sys.stderr)
+                sys.exit(1)
+        else:
+            # Raw dispatch: stream statuses as they complete. read_body=False since
+            # we only print the status line, so no body is ever downloaded. No
+            # module, so proxy follows --proxy / direct (no burp opt-in).
+            proxy, proxy_auth = resolve_proxy(config, use_burp=False)
 
-        try:
-            asyncio.run(_raw())
-        except KeyboardInterrupt:
-            print("\n[leviosa] interrupted.", file=sys.stderr)
-            sys.exit(130)
+            async def _raw():
+                stream = send(
+                    source(),
+                    config,
+                    read_body=False,
+                    proxy=proxy,
+                    proxy_auth=proxy_auth,
+                    logger=logger,
+                )
+                async with aclosing(stream) as responses:
+                    async for resp in responses:
+                        print(f"{resp.status} {resp.request.method} {resp.request.url}")
+
+            try:
+                asyncio.run(_raw())
+            except KeyboardInterrupt:
+                print("\n[leviosa] interrupted.", file=sys.stderr)
+                sys.exit(130)
+    finally:
+        if logger is not None:
+            logger.close()
 
 
 if __name__ == "__main__":

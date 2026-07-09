@@ -3,14 +3,23 @@ from core.config import Config, load_config
 
 
 class TestConfigDefaults:
-    def test_proxy_enabled(self):
-        assert Config().proxy_enabled is True
+    def test_no_proxy_default(self):
+        assert Config().no_proxy is False
 
-    def test_proxy_host(self):
-        assert Config().proxy_host == "127.0.0.1"
+    def test_proxy_url_default(self):
+        assert Config().proxy_url is None
 
-    def test_proxy_port(self):
-        assert Config().proxy_port == 8080
+    def test_burp_host(self):
+        assert Config().burp_host == "127.0.0.1"
+
+    def test_burp_port(self):
+        assert Config().burp_port == 8080
+
+    def test_log_enabled_default(self):
+        assert Config().log_enabled is True
+
+    def test_log_db_path_default(self):
+        assert Config().log_db_path == "leviosa.db"
 
     def test_concurrency(self):
         assert Config().concurrency == 20
@@ -37,21 +46,28 @@ class TestConfigDefaults:
 class TestLoadConfig:
     def test_missing_toml_returns_defaults(self):
         config = load_config("/nonexistent/leviosa.toml")
-        assert config.proxy_enabled is True
+        assert config.no_proxy is False
         assert config.concurrency == 20
 
-    def test_proxy_host_and_port(self, tmp_path):
+    def test_burp_host_and_port(self, tmp_path):
         f = tmp_path / "leviosa.toml"
-        f.write_text('[proxy]\nhost = "10.0.0.1"\nport = 9090\n')
+        f.write_text('[burp]\nhost = "10.0.0.1"\nport = 9090\n')
         config = load_config(str(f))
-        assert config.proxy_host == "10.0.0.1"
-        assert config.proxy_port == 9090
+        assert config.burp_host == "10.0.0.1"
+        assert config.burp_port == 9090
 
-    def test_proxy_disabled(self, tmp_path):
+    def test_proxy_url(self, tmp_path):
         f = tmp_path / "leviosa.toml"
-        f.write_text("[proxy]\nenabled = false\n")
+        f.write_text('[proxy]\nurl = "http://127.0.0.1:8081"\n')
         config = load_config(str(f))
-        assert config.proxy_enabled is False
+        assert config.proxy_url == "http://127.0.0.1:8081"
+
+    def test_log_settings(self, tmp_path):
+        f = tmp_path / "leviosa.toml"
+        f.write_text('[log]\nenabled = false\npath = "/tmp/custom.db"\n')
+        config = load_config(str(f))
+        assert config.log_enabled is False
+        assert config.log_db_path == "/tmp/custom.db"
 
     def test_concurrency_limit(self, tmp_path):
         f = tmp_path / "leviosa.toml"
@@ -61,16 +77,16 @@ class TestLoadConfig:
 
     def test_unset_fields_keep_defaults(self, tmp_path):
         f = tmp_path / "leviosa.toml"
-        f.write_text("[proxy]\nport = 9090\n")
+        f.write_text("[burp]\nport = 9090\n")
         config = load_config(str(f))
-        assert config.proxy_host == "127.0.0.1"
-        assert config.proxy_port == 9090
+        assert config.burp_host == "127.0.0.1"
+        assert config.burp_port == 9090
 
     def test_empty_toml_returns_defaults(self, tmp_path):
         f = tmp_path / "leviosa.toml"
         f.write_text("")
         config = load_config(str(f))
-        assert config.proxy_enabled is True
+        assert config.no_proxy is False
         assert config.concurrency == 20
 
     def test_body_max_bytes(self, tmp_path):

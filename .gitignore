@@ -11,3 +11,7 @@ build/
 .claude/
 *.swp
 *.swo
+# local sqlite traffic logs
+*.db
+*.db-wal
+*.db-shm
