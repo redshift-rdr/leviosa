@@ -141,27 +141,17 @@ from core.filters import (
 )
 ```
 
-Most modules just wire the **standard filter flags** (`--method` (repeatable),
-`--path`, `--sample`, `--sample-seed`) with two helpers, then return the result
-from `request_filters()`:
+The easiest way to add the **standard filter flags** (`--method` (repeatable),
+`--path`, `--sample`, `--sample-seed`) is the `BaseModule.parse_request_filters()`
+helper — one line in `setup()`:
 
 ```python
-import argparse
-from core.filters import add_filter_args, filters_from_args
 from modules.base import BaseModule
 
 class MyModule(BaseModule):
-    def __init__(self):
-        self._filters = []
-
     def setup(self, args):
-        parser = argparse.ArgumentParser(prog="mymodule", add_help=False)
-        add_filter_args(parser)                    # registers the standard flags
-        parsed, _ = parser.parse_known_args(args)
-        self._filters = filters_from_args(parsed)  # -> list[RequestFilter]
-
-    def request_filters(self):
-        return self._filters
+        # ... parse your own flags ...
+        self.parse_request_filters(args)   # enables --method/--path/--sample/...
 
     async def mutate(self, requests, context):
         return requests
@@ -171,12 +161,28 @@ Now `leviosa reqs.json --module mymodule --method POST --sample 5` sends a rando
 5 of the POST requests. `filters_from_args` orders selective filters (method,
 path) before sampling, so `--sample` draws from the already-narrowed set.
 
+**All shipped modules already do this** — the standard filter flags work with
+`pathfuzz`, `adminfinder`, `sensitivefiles`, `versiondisclosure`, `errorpages`
+and `passthrough`.
+
+For custom behaviour, build filters yourself and return them from
+`request_filters()` (the low-level `add_filter_args` / `filters_from_args`
+helpers in `core.filters` are also available):
+
+```python
+from core.filters import MethodFilter, TakeFilter
+
+class WriteProbe(BaseModule):
+    def request_filters(self):
+        return [MethodFilter(["POST", "PUT", "PATCH"]), TakeFilter(50)]
+    ...
+```
+
 Notes:
 
 - **New filters are just subclasses.** Per-request ones subclass `PredicateFilter`
   and implement `keep()`; whole-stream ones subclass `RequestFilter` and
-  implement `apply()`. Instantiate them directly in `request_filters()` if you
-  don't want the standard flags.
+  implement `apply()`. Instantiate them directly in `request_filters()`.
 - **Filters run on the input seeds** (the requests handed to the module), not on
   the module's expanded output. To cap your own output, apply a filter object by
   hand inside `mutate()` — e.g. `return TakeFilter(100).apply(self._variants(...))`.
@@ -384,6 +390,6 @@ class ParamFuzzer(BaseModule):
 - [ ] Cross-response logic accumulates on `context.data` in `analyze_one` and emits in `finalize` (responses stream one at a time, in completion order)
 - [ ] `needs_body = False` set if only status/headers are inspected
 - [ ] `use_burp = True` set only if this module's (typically low-volume) traffic should be routed through burpsuite
-- [ ] Request filters (via `request_filters()`) wired if the module should sample or restrict its inputs — `add_filter_args`/`filters_from_args` for the standard `--method/--path/--sample` flags
+- [ ] Standard request filters enabled with `self.parse_request_filters(args)` in `setup()` (or custom filters returned from `request_filters()`)
 - [ ] Findings printed to stdout; prefix with `[MODULENAME]`
 - [ ] `status == 0` means a network error — handle or filter as appropriate

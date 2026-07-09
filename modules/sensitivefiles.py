@@ -157,6 +157,8 @@ class SensitiveFiles(pathfuzz.PathFuzzer):
         if parsed.sensitive_extra:
             self._wordlist.extend(self._read_paths(parsed.sensitive_extra))
 
+        self.parse_request_filters(args)
+
     @staticmethod
     def _read_paths(path: str) -> list[str]:
         # Strip leading slashes but preserve a trailing slash (dir marker).

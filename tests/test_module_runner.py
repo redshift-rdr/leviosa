@@ -93,6 +93,30 @@ class TestPassthroughModule:
 
 
 # ---------------------------------------------------------------------------
+# Every shipped module wires the standard request filters
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name", [
+    "passthrough", "pathfuzz", "adminfinder", "sensitivefiles",
+    "versiondisclosure", "errorpages",
+])
+def test_all_modules_wire_request_filters(name, tmp_path):
+    from core.filters import MethodFilter, SampleFilter
+    from core.loader import load_modules
+
+    # pathfuzz requires --wordlist; other modules ignore the extra flag.
+    wl = tmp_path / "w.txt"
+    wl.write_text("admin\n")
+
+    module = load_modules([name])[0]
+    module.setup(["--wordlist", str(wl), "--method", "POST", "--sample", "3", "--sample-seed", "1"])
+
+    kinds = [type(f) for f in module.request_filters()]
+    assert MethodFilter in kinds
+    assert SampleFilter in kinds
+
+
+# ---------------------------------------------------------------------------
 # run_modules integration tests (send() is patched with a fake async generator)
 # ---------------------------------------------------------------------------
 

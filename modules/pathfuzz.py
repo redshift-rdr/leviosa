@@ -31,6 +31,7 @@ class PathFuzzer(BaseModule):
         self._keyword: str = "FUZZ"
         self._recursive: bool = False
         self._skip = StatusCodeAnalyser([0, 404])
+        self._filters = []
 
     def setup(self, args: list[str]) -> None:
         parser = argparse.ArgumentParser(prog="pathfuzz", add_help=False)
@@ -46,6 +47,7 @@ class PathFuzzer(BaseModule):
             self._wordlist = [line.strip() for line in f if line.strip()]
         self._keyword = parsed.keyword
         self._recursive = parsed.recursive
+        self.parse_request_filters(args)
 
     async def mutate(self, requests, context):
         if self._wordlist is None:

@@ -85,6 +85,7 @@ class VersionDisclosure(BaseModule):
         # Preserve preferred display casing for curated headers.
         self._display = {h.lower(): h for h in self.DISCLOSING_HEADERS}
         self._heuristic = True
+        self._filters = []
 
     def setup(self, args: list[str]) -> None:
         parser = argparse.ArgumentParser(prog="versiondisclosure", add_help=False)
@@ -103,6 +104,7 @@ class VersionDisclosure(BaseModule):
             self._known.add(name.lower())
             self._display.setdefault(name.lower(), name)
         self._heuristic = not parsed.no_heuristic
+        self.parse_request_filters(args)
 
     def _disclosures(self, response) -> list[tuple[str, str]]:
         """

@@ -21,9 +21,10 @@ dev = [
 
 [project.scripts]
 leviosa = "leviosa:main"
+leviosa-traffic = "traffic:main"
 
 [tool.setuptools]
-py-modules = ["leviosa"]
+py-modules = ["leviosa", "traffic"]
 
 [tool.setuptools.packages.find]
 where = ["."]

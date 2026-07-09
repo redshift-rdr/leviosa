@@ -98,6 +98,33 @@ leviosa requests.json --log-db engagement.db
 leviosa requests.json --no-log
 ```
 
+##### inspecting the log
+
+`traffic.py` (installed as `leviosa-traffic`) queries the log with **stackable**
+filters and prints a readable table. Every filter is AND-combined, so you can
+narrow by time, status, method, module and path at once:
+
+```bash
+# Everything (newest first, capped at 100 rows by default)
+python traffic.py --desc
+
+# 500s captured on or after a time — filters stack
+python traffic.py --after "2026-07-09 12:00" --status 500
+
+# All 5xx to an /api path, sent by the errorpages module
+python traffic.py --status-class 5xx --path /api --module errorpages
+
+# Just count the network errors
+python traffic.py --errors-only --count
+```
+
+Filters: `--after`/`--before` (any time format SQLite parses), `--status`
+(repeatable), `--status-class` (e.g. `5xx`), `--method` (repeatable), `--module`
+(`--module ''` for raw dispatch), `--path` (URL substring), `--errors-only`.
+Output columns: datetime (UTC), method, status, bytes, module, and the path
+(truncated with `--path-width`). Defaults to the configured log db; pass a path
+as the first argument to inspect another.
+
 #### refreshing timed-out session cookies
 
 Captured requests go stale when their session cookie expires. Refresh the
@@ -207,21 +234,23 @@ reported as it arrives, and a deduplicated inventory of every distinct
 #### request filters
 
 A module can restrict or sample the requests it receives before it runs, via
-**request filters** (`core/filters.py`). Modules that opt in expose the standard
-flags — `--method` (repeatable), `--path` (regex on the URL path), `--sample N`
-and `--sample-seed` — which compose (selective filters first, then sampling).
-`passthrough` is wired up as the reference:
+**request filters** (`core/filters.py`). **All shipped modules** support the
+standard flags — `--method` (repeatable), `--path` (regex on the URL path),
+`--sample N` and `--sample-seed` — which compose (selective filters first, then
+sampling):
 
 ```bash
-# Replay only the POST requests from a captured set
-leviosa requests.json --module passthrough --method POST
+# Fuzz admin paths on only the POST requests from a captured set
+leviosa requests.json --module adminfinder --method POST
 
-# Work on a reproducible random sample of 5 requests to /api paths
-leviosa requests.json --module passthrough --path '^/api' --sample 5 --sample-seed 7
+# Run errorpages against a reproducible random sample of 5 requests to /api paths
+leviosa requests.json --module errorpages --path '^/api' --sample 5 --sample-seed 7
 ```
 
-Filters are pluggable: a new one is just a `RequestFilter` (or `PredicateFilter`)
-subclass. See the "Request filters" section in `module_creation.md`.
+Filters run on a module's input requests (a module can also apply one to its own
+output). They're pluggable: a new one is just a `RequestFilter` (or
+`PredicateFilter`) subclass. See the "Request filters" section in
+`module_creation.md`.
 
 ### writing a module
 

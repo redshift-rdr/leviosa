@@ -105,6 +105,7 @@ class ErrorPages(BaseModule):
     def __init__(self):
         self._enabled = list(ALL_TECHNIQUES)
         self._long_url_len = 4096
+        self._filters = []
         # Maps id(variant request) -> technique label. Populated as variants are
         # yielded and popped as each response is analysed, so it stays bounded to
         # roughly the in-flight window rather than growing with the whole scan.
@@ -134,6 +135,7 @@ class ErrorPages(BaseModule):
                 )
             self._enabled = chosen
         self._long_url_len = parsed.long_url_len
+        self.parse_request_filters(args)
 
     async def mutate(self, requests, context):
         return self._variants(requests)

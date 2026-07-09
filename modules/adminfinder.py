@@ -125,6 +125,8 @@ class AdminFinder(pathfuzz.PathFuzzer):
         if parsed.admin_extra:
             self._wordlist.extend(self._read_paths(parsed.admin_extra))
 
+        self.parse_request_filters(args)
+
     @staticmethod
     def _read_paths(path: str) -> list[str]:
         with open(path) as f:
