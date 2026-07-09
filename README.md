@@ -39,6 +39,9 @@ source .venv/bin/activate
 pip install --no-index --find-links=./bundled_requirements aiohttp
 ```
 
+On Windows, `.\install.ps1` does the same (creates `.venv` and installs aiohttp
+from the bundled wheels).
+
 ### usage
 
 ```bash
