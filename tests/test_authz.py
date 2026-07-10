@@ -61,8 +61,9 @@ def test_needs_body_false():
     assert Authz.needs_body is False
 
 
-def test_does_not_opt_into_burp_by_default():
-    assert Authz.use_burp is False
+def test_routes_through_burp():
+    # authz opts into burp so the auth-matrix traffic is easy to inspect/replay.
+    assert Authz.use_burp is True
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +174,7 @@ class TestMutate:
         variants = list(await m.mutate([make_request(url="http://x/")], LeviosaContext()))
         labels = [m._request_meta[id(v)][1] for v in variants]
         assert labels == ["(original)", "admin", "guest"]
-        assert m._endpoints == ["GET http://x/"]
+        assert m._endpoints == ["GET /"]
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +201,7 @@ class TestTable:
         out = capsys.readouterr().out
         assert "authorisation matrix" in out
         assert "(original)" in out and "admin" in out and "guest" in out
-        assert "GET http://x/admin" in out
+        assert "GET /admin" in out
         # guest differs from original → starred; admin matches → not starred
         assert "403*" in out
         assert "1 of 1 endpoints differ across users" in out
@@ -238,7 +239,7 @@ class TestTable:
         }
         await drive(m, seeds, status)
         out = capsys.readouterr().out
-        assert "http://x/a" in out and "http://x/b" in out
+        assert "GET /a" in out and "GET /b" in out
         assert "1 of 2 endpoints differ across users" in out
 
     async def test_silent_when_no_results(self, tmp_path, capsys):

@@ -2,6 +2,7 @@ import argparse
 import json
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from core.cookies import overrides_from_donor
 from core.models import Param
@@ -131,7 +132,13 @@ class Authz(BaseModule):
 
     @staticmethod
     def _endpoint_label(req) -> str:
-        return f"{req.method} {req.url}"
+        # Strip scheme+host so the column shows just the path (+ query), which is
+        # far easier to scan than a full URL repeated on every row.
+        parts = urlsplit(req.url)
+        path = parts.path or "/"
+        if parts.query:
+            path = f"{path}?{parts.query}"
+        return f"{req.method} {path}"
 
     @staticmethod
     def _impersonate(req, cookies: dict[str, str]):
