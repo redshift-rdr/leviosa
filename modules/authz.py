@@ -43,6 +43,7 @@ class Authz(BaseModule):
 
     # Status-only module: the engine skips reading response bodies.
     needs_body = False
+    use_burp = True
 
     def __init__(self):
         # list of (label, {cookie_name: value})
