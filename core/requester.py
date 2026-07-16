@@ -1,4 +1,5 @@
 import asyncio
+import random
 import sys
 from collections.abc import AsyncIterator, Iterable
 from urllib.parse import urlsplit, urlunsplit
@@ -170,6 +171,11 @@ async def send(
     order). Peak memory is therefore O(concurrency), not O(total requests) — the
     caller consumes and drops each response before the next slot is refilled.
 
+    When `config.random_timing` is True requests are sent strictly sequentially
+    with a random pause (uniform between `random_timing_min` and
+    `random_timing_max` seconds) between each one, mimicking the cadence of a
+    human tester manually reviewing responses.
+
     Only this coroutine touches the request iterator and the in-flight task set,
     so there is no cross-task sharing, no sentinel bookkeeping, and StopIteration
     is caught locally (PEP 479 safe).
@@ -182,13 +188,28 @@ async def send(
     timeout = aiohttp.ClientTimeout(total=config.timeout)
     connector = aiohttp.TCPConnector(ssl=False, limit=config.concurrency)
 
-    def _spawn(req: LeviosaRequest) -> asyncio.Task:
-        return asyncio.create_task(
-            _send_one(session, req, config, read_body, proxy, proxy_auth)
-        )
-
-    req_iter = iter(requests)
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+        if config.random_timing:
+            first = True
+            for req in requests:
+                if not first:
+                    delay = random.uniform(config.random_timing_min, config.random_timing_max)
+                    if config.verbose:
+                        print(f"[leviosa] random-timing: sleeping {delay:.2f}s", file=sys.stderr)
+                    await asyncio.sleep(delay)
+                first = False
+                resp = await _send_one(session, req, config, read_body, proxy, proxy_auth)
+                if logger is not None:
+                    logger.log(resp, module=module, proxy=proxy)
+                yield resp
+            return
+
+        def _spawn(req: LeviosaRequest) -> asyncio.Task:
+            return asyncio.create_task(
+                _send_one(session, req, config, read_body, proxy, proxy_auth)
+            )
+
+        req_iter = iter(requests)
         inflight: set[asyncio.Task] = set()
         try:
             # Prime the window.

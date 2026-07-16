@@ -166,6 +166,24 @@ def build_parser() -> argparse.ArgumentParser:
              "request JSON file (refreshes a timed-out session)",
     )
     parser.add_argument(
+        "--random-timing",
+        action="store_true",
+        help="Send requests sequentially with a random human-like delay between each one "
+             "(see --random-timing-min / --random-timing-max for the range)",
+    )
+    parser.add_argument(
+        "--random-timing-min",
+        type=float,
+        metavar="SECS",
+        help="Minimum inter-request delay in seconds when --random-timing is active (default: 2.0)",
+    )
+    parser.add_argument(
+        "--random-timing-max",
+        type=float,
+        metavar="SECS",
+        help="Maximum inter-request delay in seconds when --random-timing is active (default: 8.0)",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Log debug info to stderr",
@@ -194,6 +212,14 @@ def main():
         config.follow_redirects = True
     if args.modules:
         config.modules = args.modules
+    if args.random_timing:
+        config.random_timing = True
+    if args.random_timing_min is not None:
+        config.random_timing_min = args.random_timing_min
+        config.random_timing = True
+    if args.random_timing_max is not None:
+        config.random_timing_max = args.random_timing_max
+        config.random_timing = True
     if args.verbose:
         config.verbose = True
 
@@ -207,6 +233,11 @@ def main():
         print(f"[leviosa] proxy: {proxy_info}", file=sys.stderr)
         log_info = config.log_db_path if config.log_enabled else "disabled"
         print(f"[leviosa] traffic log: {log_info}", file=sys.stderr)
+        if config.random_timing:
+            print(
+                f"[leviosa] random timing: {config.random_timing_min:.1f}s–{config.random_timing_max:.1f}s (sequential)",
+                file=sys.stderr,
+            )
 
     try:
         source = request_source(args.target)

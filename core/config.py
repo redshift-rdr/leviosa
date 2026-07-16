@@ -28,6 +28,11 @@ class Config:
     # so traffic that bypasses burp is still recorded for the engagement.
     log_enabled: bool = True
     log_db_path: str = "leviosa.db"
+    # Random inter-request delay to mimic human tester cadence. When enabled,
+    # requests are sent sequentially with a random pause between each one.
+    random_timing: bool = False
+    random_timing_min: float = 2.0
+    random_timing_max: float = 8.0
 
 
 def load_config(toml_path: str = "leviosa.toml") -> Config:
@@ -61,4 +66,11 @@ def load_config(toml_path: str = "leviosa.toml") -> Config:
         config.log_enabled = log["enabled"]
     if "path" in log:
         config.log_db_path = log["path"]
+    timing = data.get("timing", {})
+    if "random" in timing:
+        config.random_timing = timing["random"]
+    if "min" in timing:
+        config.random_timing_min = timing["min"]
+    if "max" in timing:
+        config.random_timing_max = timing["max"]
     return config
