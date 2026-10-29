@@ -15,3 +15,9 @@ build/
 *.db
 *.db-wal
 *.db-shm
+
+# local example traffic database
+/example_db_log.sqlite
+/example_db_log.sqlite-wal
+/example_db_log.sqlite-shm
+/example_db_log.sqlite-journal

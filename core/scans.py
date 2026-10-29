@@ -15,6 +15,7 @@ import aiohttp
 from yarl import URL
 
 from core.config import Config
+from core.auth import AuthGuard, AuthenticationStopped
 from core.filters import add_filter_args, filters_from_args
 from core.loader import load_modules
 from core.logdb import validate_database
@@ -25,16 +26,17 @@ from core.requester import _request_options
 from core.runner import run_modules
 from core.scanoutput import ResultsWriteError, ScanReporter
 from core.timing import HumanPacer
-from core.tooltags import BurpTool, resolve_module_tool
+from core.tooltags import BurpTool, resolve_module_tool, validate_repeater_preview
 from modules.base import BaseModule
 
 _SETTINGS = {
     'concurrency', 'max_body_bytes', 'timeout', 'follow_redirects', 'no_proxy', 'proxy_url',
     'burp_host', 'burp_port', 'human_mode', 'human_timing_min', 'human_timing_max',
     'random_timing', 'random_timing_min', 'random_timing_max', 'tool', 'log_enabled', 'verbose',
+    'auth_check', 'auth_check_url', 'auth_success_text', 'auth_mechanism', 'auth_check_interval',
 }
-_ROOT_KEYS = _SETTINGS | {'name', 'target', 'database', 'results', 'modules_dir', 'steps', 'on_error'}
-_STEP_KEYS = {'name', 'module', 'args', 'filters', 'tool', 'modules_dir'}
+_ROOT_KEYS = _SETTINGS | {'name', 'target', 'database', 'results', 'modules_dir', 'steps', 'on_error', 'repeater_preview'}
+_STEP_KEYS = {'name', 'module', 'args', 'filters', 'tool', 'modules_dir', 'repeater_preview'}
 
 
 def _string(value, label):
@@ -73,6 +75,7 @@ def read_scan(path: str) -> ScanDefinition:
     if data.get('on_error', 'continue') != 'continue':
         raise ValueError('on_error must be "continue"; runtime module failures do not stop later steps')
     name = _string(data.get('name', file.stem), 'scan name')
+    validate_repeater_preview(data.get('repeater_preview', 5))
     steps = data.get('steps')
     if not isinstance(steps, list) or not steps:
         raise ValueError('scan must contain at least one [[steps]] table')
@@ -81,6 +84,7 @@ def read_scan(path: str) -> ScanDefinition:
             raise ValueError(f'step {index} must be a table')
         _unknown(step, _STEP_KEYS, f'step {index}')
         _string(step.get('module'), f'step {index} module')
+        validate_repeater_preview(step.get('repeater_preview', data.get('repeater_preview', 5)))
         if 'name' in step:
             _string(step['name'], f'step {index} name')
         args = step.get('args', [])
@@ -106,6 +110,7 @@ def scan_config(definition: ScanDefinition, base: Config) -> Config:
 
 def _validate_config(config):
     config.validate_timing()
+    config.validate_auth()
     for key in ('follow_redirects', 'no_proxy', 'log_enabled', 'verbose'):
         if type(getattr(config, key)) is not bool:
             raise ValueError(f'{key} must be true or false')
@@ -214,6 +219,7 @@ class PreparedStep:
     name: str
     module: BaseModule
     config: Config
+    repeater_preview: int = 5
 
 
 @dataclass
@@ -240,6 +246,14 @@ def prepare_scan(definition, config, shared_parser, *, target=None, modules_dir=
     if source_transform is not None:
         source = source_transform(source)
     _validate_source(source)  # stream validation: do not materialise an expanded scan
+    if config.auth_check:
+        guard = AuthGuard(config)
+        for seed in source():
+            guard.bind(seed)
+            if guard.bound:
+                break
+        if not guard.bound:
+            raise ValueError('No captured credentials on the authentication-check URL origin')
     inputs = [definition.path, *map(Path, protected_paths)]
     if not target.startswith(('http://', 'https://')):
         inputs.append(Path(target))
@@ -269,7 +283,8 @@ def prepare_scan(definition, config, shared_parser, *, target=None, modules_dir=
             else:
                 tool = resolve_module_tool(module, config)
             step_config = replace(config, tool=BurpTool(tool), module_tools={})
-            steps.append(PreparedStep(index, name, module, step_config))
+            steps.append(PreparedStep(index, name, module, step_config,
+                                      spec.get('repeater_preview', definition.data.get('repeater_preview', 5))))
         except (Exception, SystemExit) as exc:
             raise ValueError(f'step {index} ({name}): {exc}') from exc
     if results is None and 'results' in definition.data:
@@ -316,20 +331,25 @@ async def run_scan(plan, *, output=None, logger=None, context=None):
     context = context or LeviosaContext()
     outcome = ScanOutcome()
     pacer = HumanPacer()
+    auth_guard = AuthGuard(plan.config, write=output.write) if plan.config.auth_check else None
     output.progress('scan_started', f'[SCAN] {plan.name}: starting {len(plan.steps)} steps',
                     target=plan.target, total=len(plan.steps))
     try:
         for step in plan.steps:
             scoped = output.scope(step=step.index, step_name=step.name,
                                   module=step.module.module_name, tool=str(step.config.tool))
-            scoped.progress('step_started', f'[SCAN] {step.index}/{len(plan.steps)} {step.name}: starting ({step.config.tool})')
+            preview = f'; first {step.repeater_preview} requests as Repeater' if step.repeater_preview and step.config.tool != BurpTool.REPEATER else ''
+            scoped.progress('step_started', f'[SCAN] {step.index}/{len(plan.steps)} {step.name}: starting ({step.config.tool}{preview})',
+                            repeater_preview=step.repeater_preview)
             try:
                 await run_modules([step.module], plan.source, step.config,
-                                  LeviosaContext(data=context.data, reporter=scoped), logger, pacer=pacer)
+                                  LeviosaContext(data=context.data, reporter=scoped), logger, pacer=pacer,
+                                  repeater_preview=step.repeater_preview,
+                                  **({"auth_guard": auth_guard} if auth_guard is not None else {}))
             except (KeyboardInterrupt, asyncio.CancelledError):
                 scoped.progress('step_finished', f'[SCAN] {step.name}: interrupted', status='interrupted')
                 raise
-            except (sqlite3.Error, ResultsWriteError) as exc:
+            except (sqlite3.Error, ResultsWriteError, AuthenticationStopped) as exc:
                 if not isinstance(exc, ResultsWriteError):
                     scoped.emit('step_finished', status='failed',
                                 error={'type': type(exc).__name__, 'message': str(exc)})

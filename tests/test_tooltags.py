@@ -13,6 +13,9 @@ from modules.base import BaseModule
 
 
 @pytest.mark.parametrize('name,tool', [
+    ('ssti', 'Intruder'), ('ssrf', 'Intruder'), ('xxe', 'Intruder'),
+    ('commandinjection', 'Intruder'),
+    ('xss', 'Repeater'), ('xsspayloads', 'Intruder'), ('traversal', 'Intruder'),
     ('passthrough', 'Repeater'), ('pathfuzz', 'Intruder'), ('adminfinder', 'Intruder'),
     ('sensitivefiles', 'Intruder'), ('authz', 'Intruder'), ('sqli', 'Scanner'),
     ('cors', 'Scanner'), ('csp', 'Scanner'), ('securityheaders', 'Scanner'),

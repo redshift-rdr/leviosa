@@ -1,0 +1,8 @@
+[
+  {
+    "method": "GET",
+    "url": "https://app.example/api/documents/42",
+    "allowed": ["alice"],
+    "contains": "document-owned-by-alice-42"
+  }
+]

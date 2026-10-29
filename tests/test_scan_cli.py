@@ -125,8 +125,8 @@ args=["--no-recommended"]
     assert '5 completed, 1 failed' in out and 'Traceback' not in err
     rows = traffic(directory / 'traffic.sqlite')
     assert [(row[1], row[2]) for row in rows] == [
-        (url + '/seed', 'Repeater'), (url + '/seed', 'Scanner'), (url + '/one/', 'Intruder'),
-        (url + '/two/', 'Repeater'), (url + '/seed', 'Scanner')]
+        (url + '/seed', 'Repeater'), (url + '/seed', 'Repeater'), (url + '/one/', 'Repeater'),
+        (url + '/two/', 'Repeater'), (url + '/seed', 'Repeater')]
     assert len(arrivals) == 5
     assert all(row[3] == '<html>scan test</html>' for row in rows)
     with sqlite3.connect(directory / 'traffic.sqlite') as conn:

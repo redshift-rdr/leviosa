@@ -30,6 +30,10 @@ class BaseModule(ABC):
     # Whether analyze_one needs the response body. False passes b"" to the
     # module. The transport still reads capped bodies if traffic logging is on;
     # with logging off it skips reads entirely.
+    # None inherits the global setting; probes can inspect the initial response.
+    follow_redirects: bool | None = None
+    store_response_cookies: bool = True
+
     needs_body: bool = True
 
     # Whether this module's traffic should be routed through the burp proxy.

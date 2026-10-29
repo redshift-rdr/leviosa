@@ -505,3 +505,23 @@ class ParamFuzzer(BaseModule):
 - [ ] Shared filters are automatic; any custom filters are returned from `request_filters()`
 - [ ] Findings emitted through `self.report()`; summaries through `context.write()`
 - [ ] `status == 0` means a network error — handle or filter as appropriate
+
+Modules that need to inspect the initial response can declare
+`follow_redirects = False`; the runner applies this per module without changing
+the shared configuration. The default `None` inherits the global setting.
+`core.probes.input_variants(request, payload)` provides immutable one-at-a-time
+mutations of scalar query/form/JSON parameters, URL query entries (including
+repeated keys), and nested scalar leaves in explicit JSON bodies.
+
+Identity-sensitive modules can set `store_response_cookies = False` to use a
+dummy cookie jar. Explicit captured cookies are still sent, while response
+Set-Cookie headers cannot contaminate subsequent identities.
+
+Configured scans send the first five generated requests per step as Repeater by
+default, then continue with the normal tool. Baselines count toward this prefix;
+modules still mutate/finalize once and analyze each response exactly once. The
+stream and HTTP session are shared across phases. Scan files can set
+`repeater_preview` globally or per step (0 disables it). Generated-request order
+therefore also controls preview order. `request.metadata["leviosa.tool"]` is
+reserved for the sender's actual per-request category; the sender preserves the
+request ID and does not modify input metadata.

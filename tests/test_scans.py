@@ -297,7 +297,7 @@ async def test_human_cadence_is_shared_across_prepared_steps(tmp_path, monkeypat
     monkeypatch.setattr('core.requester._send_one', request)
     outcome = await run_scan(plan, output=ScanReporter(terminal=Terminal()))
     assert outcome.completed == 3
-    assert starts == [100, 101, 111] and sleeps == [9]
+    assert starts == [100, 111, 122] and sleeps == [10, 10]
 
 
 async def test_broken_results_storage_stops_later_steps(failing_scan):

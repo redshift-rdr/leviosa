@@ -227,11 +227,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--validate-scan", action="store_true",
                         help="Validate and display a scan without sending traffic or creating outputs")
     parser.add_argument("--results", metavar="FILE", help="Append scan findings and progress to a separate JSONL file")
+    parser.add_argument('--auth-check', action=argparse.BooleanOptionalAction, default=None,
+                        help='Check authenticated session and pause for verified credential replacement; dispatches sequentially')
+    parser.add_argument('--auth-check-url', help='Protected GET URL used to test authentication (same origin as captured credentials)')
+    parser.add_argument('--auth-success-text', help='Text required in the protected check response, in addition to 2xx')
+    parser.add_argument('--auth-mechanism', choices=['auto', 'cookies', 'bearer'],
+                        help='Credential to refresh; auto prefers Bearer when both are present')
+    parser.add_argument('--auth-check-interval', type=int,
+                        help='Check before every N scan requests (default: 20), plus after 401/403/redirects')
     add_filter_args(parser)
     return parser
 
 
 def _apply_cli(config, args, parser, selected_modules=None):
+    for field in ('auth_check', 'auth_check_url', 'auth_success_text', 'auth_mechanism', 'auth_check_interval'):
+        value = getattr(args, field, None)
+        if value is not None:
+            setattr(config, field, value)
     if args.proxy is not None:
         config.proxy_url = args.proxy
     if args.no_proxy:
@@ -279,6 +291,7 @@ def _apply_cli(config, args, parser, selected_modules=None):
         config.human_mode = True
     try:
         config.validate_timing()
+        config.validate_auth()
     except ValueError as exc:
         parser.error(str(exc))
     if args.verbose:
@@ -462,6 +475,16 @@ def main():
             proxy, proxy_auth = resolve_proxy(config, use_burp=False)
 
             async def _raw():
+                guard = None
+                if config.auth_check:
+                    from core.auth import AuthGuard, AuthenticationStopped
+                    guard = AuthGuard(config)
+                    for seed in source():
+                        guard.bind(seed)
+                        if guard.bound:
+                            break
+                    if not guard.bound:
+                        raise AuthenticationStopped('No captured credentials on the authentication-check URL origin')
                 stream = send(
                     source(),
                     config,
@@ -469,6 +492,7 @@ def main():
                     proxy=proxy,
                     proxy_auth=proxy_auth,
                     logger=logger,
+                    **({"auth_guard": guard} if guard is not None else {}),
                 )
                 async with aclosing(stream) as responses:
                     async for resp in responses:
@@ -479,7 +503,7 @@ def main():
             except KeyboardInterrupt:
                 print("\n[leviosa] interrupted.", file=sys.stderr)
                 sys.exit(130)
-            except (ValueError, TypeError, sqlite3.Error) as e:
+            except (RuntimeError, ValueError, TypeError, sqlite3.Error) as e:
                 print(f"error: {e}", file=sys.stderr)
                 sys.exit(1)
     finally:

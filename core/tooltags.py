@@ -29,3 +29,8 @@ def resolve_module_tool(module, config) -> BurpTool:
     if override is None:
         override = config.tool
     return BurpTool(module.tool if override is None else override)
+
+
+def validate_repeater_preview(count: int) -> None:
+    if type(count) is not int or count < 0:
+        raise ValueError('repeater_preview must be a non-negative integer')

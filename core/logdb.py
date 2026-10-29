@@ -69,13 +69,14 @@ class TrafficLogger:
         tool = BurpTool(tool)
         if not response.traffic:
             raise ValueError("Traffic logging requires transport-captured HTTP exchanges")
+        redact = response.request.metadata.get("leviosa.redact_traffic", False)
         for record in response.traffic:
             self.conn.execute(
                 "INSERT INTO ACTIVITY (" + ", ".join(_COLUMNS) + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.local_source_ip, record.target_url, record.method, str(tool),
-                    _text(record.request_raw), record.sent_at.strftime("%Y-%m-%d %H:%M:%S"),
-                    str(record.status), _text(record.response_body, record.response_encoding),
+                    "[redacted test exchange]" if redact else _text(record.request_raw), record.sent_at.strftime("%Y-%m-%d %H:%M:%S"),
+                    str(record.status), "[redacted test exchange]" if redact else _text(record.response_body, record.response_encoding),
                 ),
             )
 

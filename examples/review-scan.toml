@@ -5,6 +5,9 @@ database = "review.sqlite"
 results = "review.jsonl"
 no_proxy = true
 human_mode = true
+# First generated requests per step use Repeater, then the normal category.
+# Set to 0 to disable globally; individual steps can override this count.
+repeater_preview = 5
 on_error = "continue"
 
 [[steps]]

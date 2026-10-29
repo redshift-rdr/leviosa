@@ -140,9 +140,9 @@ target or Burp. Defaults do not depend on request counts:
 
 | Category | Default activity |
 | --- | --- |
-| `Repeater` | Raw dispatch and `passthrough`: replaying requests |
-| `Intruder` | `pathfuzz`, `adminfinder`, `sensitivefiles`, `authz`: iterating paths or identities |
-| `Scanner` | `sqli`, `cors`, `csp`, `securityheaders`, `versiondisclosure`, `methodtamper`, `errorpages`: checking security conditions |
+| `Repeater` | Raw dispatch, `passthrough`, and `xss`: replay and reflection checks |
+| `Intruder` | `pathfuzz`, `adminfinder`, `sensitivefiles`, `authz`, `idor`, `xsspayloads`, `traversal`, `commandinjection`, `ssti`, `ssrf`, `xxe`: iterating paths, identities or payloads |
+| `Scanner` | `sqli`, `cors`, `csp`, `securityheaders`, `versiondisclosure`, `methodtamper`, `errorpages`, `sessioncookies`, `openredirect`: checking security conditions |
 
 ```bash
 # Override every selected module (or raw dispatch)
@@ -422,6 +422,7 @@ database = "engagement.sqlite"
 # Optional; omit for console-only findings and progress:
 results = "engagement.jsonl"
 human_mode = true
+repeater_preview = 5           # first five generated requests per step use Repeater
 on_error = "continue"
 
 [[steps]]
@@ -455,15 +456,54 @@ settings override the scan file.
 Optional root settings are `concurrency`, `max_body_bytes`, `timeout`,
 `follow_redirects`, `no_proxy`, `proxy_url`, `burp_host`, `burp_port`, `log_enabled`,
 `verbose`, `tool`, `human_mode`, `human_timing_min`, `human_timing_max`,
-`random_timing`, `random_timing_min` and `random_timing_max`. Use `no_proxy=true`
+`random_timing`, `random_timing_min`, `random_timing_max` and `repeater_preview`. Use `no_proxy=true`
 for a direct scan. `modules_dir` selects custom modules globally, or put it on
 individual steps to mix custom and built-in modules.
 
-Steps accept `name`, `module`, `args`, `filters`, `tool` and `modules_dir`. Filters
+Steps accept `name`, `module`, `args`, `filters`, `tool`, `modules_dir` and
+`repeater_preview`. Filters
 can instead be expressed as standard filter flags in `args`; mixing the two
 forms within a step is rejected. CLI request filters apply first, followed by
 step filters. Put module options in step `args`; `--module` and loose module
 arguments cannot be combined with `--scan`.
+
+Configured scans default to a **five-request Repeater preview for every step**.
+The first five generated requests are sent sequentially as Repeater, then the
+remaining requests use the resolved normal tool and its usual concurrency. This
+uses the module's existing generation order: baseline requests count toward the
+five, and payload lists retain their configured order. These are the first five
+requests, not five distinct payloads or five requests per input. A short step can
+therefore run entirely as Repeater. Already-Repeater steps retain their normal
+Repeater behavior.
+
+Preview requests are analyzed once as part of the same module run. The request
+stream, baseline comparisons and HTTP session continue across the transition;
+requests are not replayed. With human mode enabled, preview requests use the
+shared Repeater cadence, including the interval between steps. Explicit random
+timing still applies to every request. Traffic rows and finding events record
+the actual request category, including redirect hops. Proxy routing continues to
+follow the module's existing settings.
+
+Set `repeater_preview = N` at the root of a scan file to change the default, or
+inside a `[[steps]]` table to override it for that step. Use `0` to disable the
+preview globally or for a particular step. Counts must be non-negative integers.
+For example:
+
+```toml
+repeater_preview = 5
+
+[[steps]]
+module = "traversal"
+repeater_preview = 3
+
+[[steps]]
+module = "commandinjection"
+repeater_preview = 0
+```
+
+The preview applies to `--scan` runs by default; direct `-m` runs keep their
+usual tags. Tool overrides select the normal phase's category; enabled previews
+remain Repeater. Disable the preview when every request must use an override.
 
 Tool precedence for scans is CLI module override > CLI run-wide override > step
 `tool` > scan-file `tool` > `leviosa.toml` module/default overrides > module
@@ -489,7 +529,8 @@ in `ACTIVITY`; they do not by themselves fail a module.
 The optional results file is append-only JSONL and is separate from SQLite.
 Events include `scan_started`, `step_started`, `finding`, `message`,
 `step_finished` and `scan_finished`, with UTC timestamps and a unique run ID.
-Step records include the index, name, public module name and resolved tool;
+Step records include the index, name, public module name, resolved normal tool
+and configured preview count; finding events use the actual request tool;
 findings include observation, confidence, evidence and request identifiers,
 method and URL. Binary evidence is represented using base64. Each event is
 flushed so progress is inspectable during execution. Reusing a file appends a
@@ -586,3 +627,511 @@ aiohttp, rather than byte-for-byte replay of an entire captured HTTP message.
 
 Traffic logs use only the Burp-compatible `ACTIVITY` schema described above.
 Request IDs, probe metadata, findings and response headers are not added to it.
+
+### application testing modules
+
+The first application-testing batch adds `sessioncookies`, `openredirect`, `xss`,
+and `idor`, and extends `authz`. All five inspect the initial response even when
+`--follow-redirects` is enabled, so redirects to login pages cannot hide the
+original status or an external redirect destination.
+
+```bash
+# Declare sensitive cookie names explicitly; repeat for multiple session cookies.
+leviosa requests.json -m sessioncookies --session-cookie sessionid
+
+# Mutate one query/form/JSON input at a time, including query strings in URLs
+# and nested scalar fields in explicit JSON bodies.
+leviosa requests.json -m openredirect
+leviosa requests.json -m xss  # Repeater: existing reflection/context check
+leviosa requests.json -m xsspayloads  # Intruder: built-in payload scan
+leviosa requests.json -m xsspayloads \
+  --xss-payloads /usr/share/seclists/Fuzzing/XSS/XSS-Somdev.txt
+
+# Donor captures supply cookies, Authorization, X-API-Key and X-Tenant-ID.
+# Add custom credential or tenant headers explicitly.
+leviosa requests.json -m authz \
+  --session alice=alice.json --session bob=bob.json \
+  --identity-header X-Workspace-ID --anonymous --compare-body
+
+# Replay known owned-object requests against other identities.
+leviosa object-requests.json -m idor \
+  --session alice=alice.json --session bob=bob.json \
+  --access-rules examples/object-access-rules.json --anonymous
+```
+
+`sessioncookies` checks Secure, SameSite validity, secure cookie prefixes and
+Domain scope. HttpOnly, missing explicit SameSite, HTTP transport and site-wide
+Path reviews apply only to cookie names selected with `--session-cookie`; it
+does not guess which cookies authenticate users. Domain and Path observations
+are review prompts, not proof of a vulnerability. Findings exclude cookie values.
+Only response Set-Cookie headers are audited, so include login/refresh requests
+in the input to observe cookies being issued.
+
+`openredirect` sends unique HTTPS and scheme-relative destinations under
+`leviosa.invalid`. A finding requires a 301/302/303/307/308 Location resolving to
+the exact probe hostname. It never follows that redirect. It does not test
+JavaScript or HTML meta refresh redirects.
+
+`xss` injects unique markers and a harmless custom HTML element. It distinguishes
+encoded/plain reflection from injected HTML elements, script text, event handler
+attributes and URL attributes in HTML responses. Results are **potential reflected
+XSS**, not confirmed script execution. URL-attribute reflection may be benign;
+verify the encoding and browser behavior. DOM XSS and stored XSS need separate
+browser/workflow testing. Raw request bodies and cookie/header inputs are not
+mutated by these two modules.
+
+`authz` replaces configured identity headers in both raw headers and header
+parameters, and replaces all cookies. A header absent from a donor is removed,
+so the captured user's bearer token cannot survive a swap. Unconfigured custom
+credential headers remain unchanged: select them with `--identity-header`.
+Donor captures should contain a consistent identity; later captured values win.
+Response cookies are not stored between identities, including anonymous requests.
+Anonymous mode strips cookies and configured identity headers. Body comparison
+uses canonical JSON or whitespace-normalized text fingerprints, reports matching
+successful nonempty responses as observations, and exposes fingerprints in
+structured results. Matching responses alone do not establish unauthorized access.
+Body comparisons and access markers use the captured body prefix, subject to
+`--max-body-bytes`.
+
+Access rules are a JSON list. Each rule matches the captured request's exact
+`method` (case-insensitive) and `url`, specifies allowed session labels, and may
+specify a case-sensitive `contains` response marker. For example:
+
+```json
+[
+  {
+    "method": "GET",
+    "url": "https://app.example/api/documents/42",
+    "allowed": ["alice"],
+    "contains": "document-owned-by-alice-42"
+  }
+]
+```
+
+`authz --access-rules FILE` reports an indicator when a disallowed identity gets
+2xx and the marker matches, if provided. `idor` requires an object-specific marker
+on every rule and only replays requests matching those rules. It tests captured
+object identifiers in paths, queries or bodies without guessing new identifiers.
+Choose a marker that identifies the owned object rather than generic page chrome.
+These checks verify response access; they do not verify write side effects.
+Run `authz` and `idor` as separate scan steps because they share option names.
+
+`xss` retains its reflection checking behavior and defaults to **Repeater**.
+`xsspayloads` defaults to **Intruder** and sends a baseline followed by each
+payload in each supported input separately. The built-in set covers script
+elements, image/SVG event handlers, quote breakouts and JavaScript URLs. Use
+`--xss-payloads FILE` to replace it with a local SecLists or custom UTF-8 file,
+one payload per nonblank line. Payloads are preserved literally, including
+percent escapes and whitespace; optional `{marker}` tokens become a unique
+per-request marker. Files are loaded during setup, so they must fit in memory.
+Both modules can run together with `-m xss -m xsspayloads`.
+
+The payload scan looks for injected code in script text, event handlers,
+JavaScript URLs and script sources in HTML responses. It suppresses matching
+contexts already present in the baseline and skips findings if that baseline
+request failed. Encoded reflections, ordinary text, and inert HTML containers do
+not by themselves produce payload-scan findings. This is a heuristic HTTP scan:
+JavaScript string boundaries, browser-specific parsing, CSP, and user interaction
+can affect exploitability. Findings remain indicators requiring browser
+verification. Stored/DOM XSS and payload transformations that defeat literal code
+matching are outside its coverage. User-supplied lists may contain external
+resource URLs; the scan does not render or execute returned HTML.
+
+As with other modules, explicit `--tool` and `--module-tool` settings can override
+the default categories. Human mode paces the Repeater reflection check while
+the Intruder payload scan uses normal concurrency.
+
+### traversal and local file inclusion
+
+`traversal` is a combined **Intruder** module for path traversal and local file
+inclusion (LFI). It sends a baseline, then replaces one scalar query, form or
+JSON input at a time with each payload. It supports query strings embedded in
+URLs, repeated query keys, and nested fields in explicit JSON bodies. Requests
+without supported inputs are skipped. URL path segments, raw bodies, cookies
+and headers are not mutated.
+
+```bash
+# Built-in Linux and Windows payloads
+leviosa requests.json -m traversal
+
+# Replace the built-ins with a local payload list
+leviosa requests.json -m traversal \
+  --traversal-payloads /usr/share/seclists/Fuzzing/LFI/LFI-Jhaddix.txt
+
+# For other files, supply a unique literal expected in the file's contents
+leviosa requests.json -m traversal \
+  --traversal-payloads canary-paths.txt \
+  --traversal-marker 'leviosa-owned-test-file-7392'
+```
+
+The built-in set includes absolute paths, relative paths at several depths,
+backslash variants, encoded/double-encoded traversal, nested traversal sequences,
+a null-byte suffix, a `file://` URI and a PHP base64-filter wrapper. File targets
+are `/etc/passwd` and Windows `win.ini`. Payload lists are UTF-8, one payload per
+nonblank line; spaces and percent escapes are preserved literally. Normal HTTP
+parameter encoding still applies, so percent-escaped payloads test an additional
+application decoding layer rather than sending raw HTTP bytes. Lists are loaded
+into memory during setup. In scan files, `--traversal-payloads` paths resolve
+relative to the scan file.
+
+Findings require newly introduced recognizable file contents: a complete root
+passwd record, multiple characteristic `win.ini` section names, or a configured
+literal marker. `--traversal-marker` is repeatable; choose text identifying the
+controlled file's contents rather than its filename or a generic error message.
+When the payload list includes `convert.base64-encode`, the module also checks
+base64 text for these file signatures. This supports PHP-filter responses
+embedded in HTML. Custom files without a known signature need an explicit marker.
+
+The module suppresses evidence already in the baseline or in the submitted
+payload itself, compares raw/base64 versions of the same signature consistently,
+and skips findings when the baseline request fails to connect. It handles
+responses arriving out of order and keeps redirects visible. HTTP status changes,
+include warnings, reflected filenames and body-length differences alone do not
+produce findings. Results are file-access indicators; they do not distinguish
+file reads from execution through an include operation. Body checks are subject
+to `--max-body-bytes`. Explicit tool overrides work as for other modules.
+
+### OS command injection
+
+`commandinjection` is an **Intruder** payload module. It sends an unchanged
+baseline followed by one payload per scalar query/form/JSON input, including URL
+query strings and nested fields in explicit JSON bodies. Redirects are not
+followed. Raw bodies, URL path segments, headers and cookies are not mutated.
+
+```bash
+# Built-in POSIX shell, Windows cmd and PowerShell probes
+leviosa requests.json -m commandinjection
+
+# Replace the built-ins with a UTF-8 payload list
+leviosa requests.json -m commandinjection \
+  --command-payloads command-payloads.txt
+
+# A local SecLists list can also be replayed
+leviosa requests.json -m commandinjection \
+  --command-payloads /usr/share/seclists/Fuzzing/command-injection-commix.txt
+```
+
+Built-in payloads cover shell separators, pipes, command substitution, newline
+separation and quoted contexts. They print a unique generated marker using
+`printf`, `echo`, or `Write-Output`. The marker is split in the command text so
+simple reflection cannot look like command execution. They do not use timing
+delays, network callbacks or file writes.
+
+Custom files contain one payload per nonblank line. Whitespace, percent escapes
+and ordinary braces are preserved; normal HTTP parameter encoding still applies.
+Files are loaded during setup, and paths in scan definitions resolve relative to
+the scan file. These optional placeholders are expanded for each input request:
+
+| Placeholder | Expansion |
+| --- | --- |
+| `{posix}` | POSIX printf command producing the generated marker |
+| `{cmd}` | Windows cmd echo command producing the generated marker |
+| `{powershell}` | PowerShell Write-Output command producing the generated marker |
+| `{marker}` | Literal generated marker for custom command construction |
+
+For example, `;{posix};#` and `&{cmd}&rem ` are complete payload lines. The three
+command placeholders keep the complete expected marker out of the submitted
+payload. A literal `{marker}` echoed back cannot establish execution and is
+suppressed. Lists without placeholders are sent unchanged. They can produce
+findings from full Unix `id` output, Windows account SIDs, or additional literal
+expected output supplied with repeatable `--command-marker TEXT` options. Choose
+custom output markers that are absent from the submitted payload and baseline;
+`whoami` usernames or hostnames alone are too ambiguous to detect automatically.
+
+Findings require new command-output evidence beyond the baseline and the payload
+itself. Network failures, shell errors, HTTP status changes and response-length
+differences alone do not produce findings. Responses can arrive out of order;
+failed baseline connections suppress findings for that seed. Results remain
+indicators for review, particularly static account-output signatures. This module
+covers output-visible command injection; blind timing-based or callback-based
+injection needs separate checks. Body matching is subject to `--max-body-bytes`.
+
+### template injection, SSRF and XXE
+
+`ssti`, `ssrf` and `xxe` are payload-based **Intruder** modules. Configured scans
+apply the normal Repeater preview before continuing as Intruder. All three keep
+redirects visible, compare evidence against a baseline, handle responses arriving
+out of order, and support UTF-8 payload files with one payload per nonblank line.
+Payload paths in scan definitions resolve relative to the scan file. Files are
+loaded into memory during setup; body checks use the `--max-body-bytes` prefix.
+
+```bash
+leviosa requests.json -m ssti
+leviosa requests.json -m ssrf
+leviosa requests.json -m xxe
+
+# Replace built-in template probes with the example payload set
+leviosa requests.json -m ssti --ssti-payloads examples/ssti-payloads.txt
+```
+
+`ssti` tests common double-brace, dollar/hash expression, ERB/JSP-style,
+Thymeleaf-style and Smarty arithmetic forms. Each template gets two different
+arithmetic expressions wrapped in unique delimiters. A finding requires **both**
+expected evaluated outputs, absent from the baseline and submitted payloads.
+Simple reflection, a single arithmetic result or a template error is insufficient.
+The module reports evaluation indicators rather than claiming a particular engine
+or code execution capability.
+
+Custom SSTI templates can contain `{expression}`. A literal arithmetic example
+such as `{{7*7}}` is also converted into paired randomized expressions. Other
+custom templates are replayed literally; repeatable `--ssti-marker TEXT` options
+can specify expected output for them. Select output text absent from both the
+payload and baseline. Whitespace and unrelated template braces are preserved.
+
+`ssrf` replaces scalar query/form/JSON inputs with absolute URL payloads; URL
+query strings and nested explicit JSON bodies are supported. Built-ins include
+loopback HTTP URLs, IPv6 loopback, local-file URLs and an optional controlled
+callback URL. Newly introduced passwd/win.ini contents or repeatable
+`--ssrf-marker TEXT` values provide response evidence. Loopback HTTP status or
+connection errors alone do not establish SSRF. File-content results can overlap
+with LFI; verify that the endpoint performs a server-side fetch. The module does
+not scan ports or automatically query cloud metadata services.
+
+For a controlled fetch check, configure an endpoint that returns unique text:
+
+```bash
+leviosa requests.json -m ssrf \
+  --ssrf-payloads examples/ssrf-payloads.txt \
+  --ssrf-callback https://listener.example/callback \
+  --ssrf-marker 'unique-response-from-your-listener'
+```
+
+`xxe` tests external general entities reading Linux/Windows files, XInclude, a
+bounded internal-entity expansion probe, and optional HTTP external entities.
+For UTF-8 raw XML bodies, built-ins preserve the root, XML declaration and
+surrounding envelope, replacing one paired-element text value or self-closing
+element per request. Comments and processing instructions are left intact.
+Existing DOCTYPE bodies are skipped by built-in body mutation. Captured body
+length/digest headers are removed so changed payloads are transmitted correctly.
+Raw bodies without Content-Type receive `application/xml; charset=utf-8`.
+
+XML payload documents can also be placed in scalar query/form/JSON inputs for
+endpoints that accept embedded XML. `--xxe-payloads FILE` replaces the built-ins
+with complete XML documents, one per line; on raw XML input these replace the
+whole body. `{callback}`, `{left}`, `{right}` and `{marker}` are optional custom
+placeholders. `{left}` and `{right}` are halves of a unique marker and can be
+joined through entity expansion. A literal reflected `{marker}` is suppressed.
+The scanner constructs XML text without resolving or fetching entities locally.
+
+New external file contents, PHP-filter base64-encoded file contents, or repeatable
+`--xxe-marker TEXT` values are external-access indicators. **Internal entity
+expansion is reported only as an observation**, since it does not demonstrate
+external entity access. Parse errors or DOCTYPE rejection alone do not generate
+findings. Non-UTF-8 raw bodies and XML attribute-value injection are outside the
+built-in body mutation coverage.
+
+For blind SSRF/XXE, connect your own HTTP callback listener using
+`--ssrf-callback URL` / `--xxe-callback URL`. Each injected input gets an independent
+random token in the callback URL's `leviosa` query parameter. The supplied listener
+must record that query value in a local JSONL file, for example:
+
+```json
+{"token":"value-of-the-leviosa-query-parameter"}
+```
+
+Create the log before the scan, then let the listener append complete JSON lines.
+Pass it using `--ssrf-interactions FILE` or `--xxe-interactions FILE`. For example:
+
+```bash
+leviosa requests.json -m ssrf \
+  --ssrf-payloads examples/ssrf-payloads.txt \
+  --ssrf-callback https://listener.example/callback \
+  --ssrf-interactions listener.jsonl
+
+leviosa requests.json -m xxe \
+  --xxe-payloads examples/xxe-payloads.txt \
+  --xxe-callback https://listener.example/callback \
+  --xxe-interactions listener.jsonl
+```
+
+Interaction logs are checked once when the module finalizes; this integration
+does not start a listener, poll a hosted provider, or wait for delayed callbacks.
+Only exact tokens from this invocation match; old events and duplicates are
+ignored. Matches identify the input and retain its actual Repeater/Intruder tag,
+even when the original HTTP request failed. They remain callback indicators:
+verify which application component made the request. A callback URL without an
+interaction log can still support response markers or manual listener review,
+but it does not automatically produce blind findings. Custom payload files using
+`{callback}` require the corresponding callback option.
+
+### Unsafe file upload checks
+
+```bash
+leviosa captured-requests.json --module fileupload
+leviosa captured-requests.json --module fileupload --upload-success-text 'Upload successful'
+```
+
+`fileupload` only sends requests whose explicit raw body contains a valid
+`multipart/form-data` file part with a nonempty filename. Other requests are
+skipped. Capture the complete multipart body and its Content-Type boundary in
+the request input; ordinary form or JSON parameters are not treated as uploads.
+Each matching seed gets a baseline, then each file part is tested independently
+with an inert text control, script/double extensions, a JPEG MIME mismatch,
+a relative traversal filename, and EICAR under `.com` and `.txt` filenames.
+Other parts (including CSRF fields) are retained. These probes can create files
+on the target; remove test uploads afterwards.
+
+EICAR's standard 68-byte antivirus test content is assembled in memory only;
+no EICAR file is created locally and the complete signature is not shipped in
+source. Both request and response raw traffic for EICAR probes are redacted
+before SQLite persistence, including redirect exchanges. Results contain probe
+labels rather than payloads. External proxies, target systems, and memory
+scanners can still inspect or retain the traffic. Use `--upload-skip-eicar` to
+omit those probes. The module does not opt into Burp routing.
+
+A 2xx response is reported as **possible acceptance**, since applications may
+return errors with status 200. Set `--upload-success-text` to require an
+application-specific success marker as well as 2xx. Redirects are not followed
+and do not count as success. Findings do not prove storage, execution, traversal,
+or absence of asynchronous antivirus scanning. No retrieval or execution of
+uploaded content is attempted. See the [official EICAR test description](https://www.eicar.org/download-anti-malware-testfile/).
+
+### Error-induced information disclosure
+
+```bash
+leviosa requests.json --module errordisclosure
+```
+
+`errordisclosure` sends an unchanged baseline followed by missing, malformed and
+oversized paths, an invalid method, junk query parameters, and invalid values
+in existing query/form/JSON inputs. Repeated URL query parameters and nested
+explicit JSON scalar values are tested independently. JSON requests also get
+null/array/object input probes and an intentionally malformed JSON body.
+Use `--error-disclosure-path-length N` to adjust the oversized path probe
+(default 4096, maximum 16384).
+
+Findings identify stack traces, internal filesystem paths, database errors and
+debug details introduced by a probe. Signature categories already present in
+the baseline are suppressed. Generic 4xx/5xx responses alone are not findings;
+disclosures on 200 responses are detected too. Redirects are not followed.
+A failed or missing baseline prevents a claim of induced disclosure. Findings
+include the technique, input location, status and bounded matching excerpts.
+These are heuristic indicators requiring review; evidence excerpts may contain
+sensitive internal details. The existing `errorpages` module remains available
+for broader error-page inventory, including ordinary HTTP error statuses.
+
+### JWT security checks
+
+```bash
+leviosa requests.json --module jwt
+leviosa requests.json --module jwt --jwt-success-text 'account-data'
+leviosa requests.json --module jwt --jwt-secrets secrets.txt --jwt-public-key public.pem
+```
+
+`jwt` skips requests without recognizable three-part JWTs containing JSON object
+headers and payloads. It discovers tokens in raw headers (including Bearer and
+Cookie), parameter values, URL query values, nested JSON bodies, and raw bodies.
+Encrypted five-part JWEs and opaque tokens are skipped. Each distinct JWT gets
+an unchanged baseline, an invalid-token control, and independent probes. Repeated
+copies of the same JWT in a request are replaced together; other tokens and
+credentials remain present.
+
+Checks include corrupted/empty signatures, `alg=none` casing variants, payload
+tampering, attacker-supplied symmetric `jwk`, and an empty `kid` with an empty
+HMAC key. A small default secret list is checked **offline** against HS256,
+HS384 and HS512 signatures. `--jwt-secrets FILE` replaces that list. When a
+secret is recovered, correctly signed expired, future-not-before, wrong-audience
+and wrong-issuer variants test claim enforcement (audience/issuer probes require
+those claims in the original). Without a signing key, claim enforcement is not
+claimed as tested. `--jwt-public-key FILE` enables asymmetric-to-HS256 confusion
+probes using the file's exact bytes. The module does not fetch key URLs or test
+remote `jku`/`x5u`, RSA embedded keys, key-ID injection, or token revocation.
+
+A bypass **indicator** requires a successful baseline, a distinguishable
+invalid-token response, and a probe matching the baseline's exact status/body.
+Alternatively, `--jwt-success-text TEXT` requires that protected-response marker
+in successful baseline/probe responses and its absence from the control.
+Network failures, 5xx controls, missing controls and redirects cannot establish
+a bypass. Generic public pages, other authentication credentials, response body
+caps, caching and dynamic content can still make results inconclusive; choose
+a protected resource and a specific success marker for meaningful results.
+Redirects are not followed and response cookies are not reused.
+
+Local token audits flag unsigned JWTs, missing expiration/audience claims, weak
+HMAC secrets, HTTP transport and query-string tokens. Missing claims require
+application-specific review. Findings omit token payloads and recovered secret
+values; normal traffic logging and request URLs can still contain credentials.
+The signature probes follow the classes described in the
+[PortSwigger JWT testing guide](https://portswigger.net/web-security/jwt).
+
+### Pause and refresh expired authentication
+
+Enable authenticated-session checking with a protected, read-only GET endpoint:
+
+```bash
+leviosa requests.json --module errordisclosure \
+  --auth-check --auth-check-url https://app.example/api/me \
+  --auth-success-text '"authenticated":true'
+```
+
+The same flags work with `--scan`. Choose an endpoint that rejects expired
+credentials, and use a specific success marker when a login/error page might
+return HTTP 200. Success requires 2xx and, when configured, the marker in the
+capped response body. Health-check redirects are never followed.
+
+The guard checks before the first scan request and every 20 requests afterwards.
+`--auth-check-interval 1` checks before every request. Scan responses with 401,
+403 or a redirect also trigger the independent health check; an intentional
+JWT/authz denial does not pause the scan when the real session remains healthy.
+A failed health check (including a connection failure) pauses dispatch and
+prompts for a replacement credential with terminal echo disabled:
+
+- Cookies: paste the full `name=value; name2=value2` set, optionally prefixed
+  with `Cookie:`. Include all cookie names from the captured session.
+- Bearer: paste the token, `Bearer TOKEN`, or `Authorization: Bearer TOKEN`.
+- Enter `:ignore` to disable checking for the remainder of the run, or `:abort`
+  to stop the entire scan. Ctrl-C also stops. Unavailable interactive input
+  stops the scan rather than continuing silently.
+
+Every candidate is tested against the protected endpoint before it is adopted.
+Failed candidates keep the scan paused and prompt again. Auto detection prefers
+Bearer when the captured request contains both mechanisms; select
+`--auth-mechanism cookies` or `--auth-mechanism bearer` explicitly if necessary.
+Both captured credentials are sent to the health endpoint, but only the selected
+mechanism is refreshed. Capture a request with the required credentials on the
+same origin as the health endpoint. Custom authentication schemes and JWTs in
+query/body fields are not refreshed by this guard.
+
+With checking enabled, scan dispatch is **sequential**, regardless of concurrency,
+so no in-flight queue can continue through a prompt. Source credentials are
+updated before module mutation, and unchanged stale credential values in queued
+variants are refreshed at dispatch. Intentionally changed/removed credentials,
+other credential values and other origins are preserved. Verified replacements
+persist across modules and scan steps, without modifying captured input files.
+The guard tracks one captured session on one origin, not multiple independent
+users. It does not log in automatically, rotate CSRF body fields, or rebuild
+already-generated token mutations. Response cookies are not carried between
+scan requests in this mode; paste refreshed cookie values when needed.
+
+A request that already received an authentication failure is reported as received
+and is not replayed automatically, avoiding duplicate state-changing actions.
+Requests between periodic checks can encounter expiry; use interval 1 to reduce
+that window. After `:ignore`, scanning continues with the last verified or
+original credentials. Health-check request/response raw traffic is redacted in
+SQLite; ordinary scan traffic still uses normal credential-containing logs.
+
+In `leviosa.toml`:
+
+```toml
+[auth]
+enabled = true
+url = "https://app.example/api/me"
+success_text = '"authenticated":true'
+mechanism = "auto" # auto, cookies, bearer
+interval = 20
+```
+
+Or use root-level settings in a scan TOML file (before `[[steps]]`):
+
+```toml
+auth_check = true
+auth_check_url = "https://app.example/api/me"
+auth_success_text = '"authenticated":true'
+auth_mechanism = "auto"
+auth_check_interval = 20
+```
+
+CLI settings override scan settings, which override `leviosa.toml`.
+`--no-auth-check` disables a configured guard. Checking is off by default.
+`--validate-scan` validates the settings and captured credential availability
+without making health requests or prompting.

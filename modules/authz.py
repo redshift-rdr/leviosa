@@ -1,5 +1,7 @@
 import argparse
 import json
+from hashlib import sha256
+import re
 from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -9,7 +11,8 @@ from core.cookies import overrides_from_donor
 from core.models import Param
 from modules.base import BaseModule
 from core.reporting import Finding
-from core.headers import without_headers
+from core.headers import without_headers, parse_headers
+from core.parsers import parse_request_file
 
 # Namespaced context key for the results grid built in analyze_one and rendered
 # in finalize(): {endpoint_index: {column_label: status}}.
@@ -26,29 +29,19 @@ class Authz(BaseModule):
     """
     Authorisation / access-control matrix.
 
-    Each --session file is a captured request file whose cookies represent one
-    user's session. For every input request the module sends:
-
-      * the request unchanged (the "(original)" column), then
-      * the request once per session, with its cookie set fully replaced by that
-        session's cookies (impersonating each user).
-
-    finalize() prints a table of the resulting status codes, one row per
-    endpoint and one column per user, so you can eyeball where access differs
-    between users — e.g. an endpoint that returns 200 for a low-privilege
-    session it should reject (broken access control), or a resource that is
-    identical for every user (missing per-user authorisation).
-
-    Cookies are swapped wholesale — every existing cookie (params and the raw
-    Cookie header) is dropped and replaced with the session's — so one user's
-    request never leaks into another's. Only status codes are compared, so
-    needs_body is False.
+    Replay each captured request unchanged and under each supplied identity.
+    Cookies and configured credential/tenant headers are replaced wholesale.
+    Optional anonymous requests strip those credentials. Body comparison reports
+    observations; explicit access rules identify unexpected successful access.
+    Redirects remain visible rather than following them to a generic login page.
     """
 
     tool = BurpTool.INTRUDER
-    path_options = {'--session': 'session'}
+    path_options = {'--session': 'session', '--access-rules': 'file'}
+    follow_redirects = False
+    store_response_cookies = False
 
-    # Status-only module: the engine skips reading response bodies.
+    # Body reads are enabled by setup for comparison or access rules.
     needs_body = False
     use_burp = True
 
@@ -58,19 +51,55 @@ class Authz(BaseModule):
         # endpoint_index -> display label ("METHOD url").
         self._endpoints: list[str] = []
         self._filters = []
+        self._identity_headers = {}
+        self._header_names = {"authorization", "x-api-key", "x-tenant-id"}
+        self._anonymous = False
+        self._rules = []
+        self._compare_body = False
 
     def option_parser(self):
         parser = argparse.ArgumentParser(prog="authz", add_help=False, allow_abbrev=False)
         parser.add_argument(
             "--session", metavar="[LABEL=]FILE", action="append", default=[],
-            help="Request file whose cookies represent one user's session "
+            help="Request file whose cookies and identity headers represent one user "
                  "(repeatable). Optionally prefix a display name, e.g. "
                  "--session admin=admin.json --session guest=guest.json",
         )
+        parser.add_argument('--identity-header', action='append', default=[], metavar='NAME',
+                            help='Additional credential/tenant header to replace from donor captures')
+        parser.add_argument('--anonymous', action='store_true', help='Add a request without configured credentials')
+        parser.add_argument('--compare-body', action='store_true', help='Compare normalized response fingerprints')
+        parser.add_argument('--access-rules', metavar='FILE', help='JSON rules: method, url, allowed identity labels, optional contains marker')
         return parser
 
     def setup(self, args: list[str]) -> None:
         parsed, _ = self.option_parser().parse_known_args(args)
+        self._sessions = []
+        self._identity_headers = {}
+        self._rules = []
+        self._header_names = {"authorization", "x-api-key", "x-tenant-id"}
+        self._anonymous = parsed.anonymous
+        self._compare_body = parsed.compare_body
+        self._header_names.update(name.lower() for name in parsed.identity_header)
+        if any(not name or any(c.isspace() or c == ':' for c in name) for name in self._header_names):
+            raise ValueError('invalid identity header name')
+        if parsed.access_rules:
+            self._rules = json.loads(Path(parsed.access_rules).read_text())
+            if not isinstance(self._rules, list):
+                raise ValueError('access rules must be a JSON list')
+            seen_rules = set()
+            for rule in self._rules:
+                if (not isinstance(rule, dict) or not isinstance(rule.get('method'), str)
+                        or not isinstance(rule.get('url'), str)
+                        or not isinstance(rule.get('allowed'), list) or not rule['allowed']
+                        or not all(isinstance(label, str) for label in rule['allowed'])
+                        or ('contains' in rule and (not isinstance(rule['contains'], str) or not rule['contains']))):
+                    raise ValueError('each access rule requires method, url, nonempty allowed labels and an optional nonempty contains string')
+                key = (rule['method'].upper(), rule['url'])
+                if key in seen_rules:
+                    raise ValueError('duplicate access rule')
+                seen_rules.add(key)
+        self.needs_body = self._compare_body or bool(self._rules)
         if not parsed.session:
             raise RuntimeError(
                 "authz requires at least one --session [LABEL=]FILE. Example: "
@@ -81,18 +110,33 @@ class Authz(BaseModule):
         seen: set[str] = set()
         for arg in parsed.session:
             label, path = self._split_session_arg(arg)
+            if not label or label in {_ORIGINAL, '(anonymous)'}:
+                raise ValueError('session labels must be nonempty and cannot use reserved matrix labels')
             label = self._unique_label(label, seen)
             try:
                 cookies = overrides_from_donor(path)
+                donor_headers = {}
+                for donor in parse_request_file(path):
+                    headers = parse_headers(donor.headers)
+                    for param in donor.params:
+                        if param.type == 'header':
+                            headers[param.name] = str(param.value)
+                    for name in self._header_names:
+                        if name in headers:
+                            donor_headers[name] = headers[name]
+                self._identity_headers[label] = donor_headers
             except FileNotFoundError:
                 raise RuntimeError(f"authz: session file not found: {path!r}")
             except (json.JSONDecodeError, KeyError) as e:
                 raise RuntimeError(f"authz: could not parse session file {path!r}: {e}")
-            if not cookies:
+            if not cookies and not donor_headers:
                 print(f"[AUTHZ] warning: no cookies found in {path!r} "
                       f"(session '{label}' will be sent unauthenticated)")
             self._sessions.append((label, cookies))
 
+        labels = {label for label, _ in self._sessions}
+        if any(set(rule['allowed']) - labels for rule in self._rules):
+            raise ValueError('access rule allowed labels must name supplied sessions')
         self.parse_request_filters(args)
 
     @staticmethod
@@ -129,9 +173,21 @@ class Authz(BaseModule):
 
             # One impersonated variant per session.
             for label, cookies in self._sessions:
-                variant = self._impersonate(req, cookies)
+                variant = self._with_identity(req, cookies, self._identity_headers.get(label, {}))
                 variant.metadata["authz"] = (idx, label)
                 yield variant
+            if self._anonymous:
+                variant = self._with_identity(req, {}, {})
+                variant.metadata['authz'] = (idx, '(anonymous)')
+                yield variant
+
+    def _with_identity(self, req, cookies, headers):
+        variant = self._impersonate(req, cookies)
+        return replace(variant,
+                       headers=without_headers(variant.headers, self._header_names) +
+                               [f'{name}: {value}' for name, value in headers.items()],
+                       params=[p for p in variant.params if not
+                               (p.type == 'header' and p.name.lower() in self._header_names)])
 
     @staticmethod
     def _endpoint_label(req) -> str:
@@ -148,7 +204,8 @@ class Authz(BaseModule):
         # Drop every existing cookie (structured params + raw Cookie header) and
         # inject the session's cookies as params. A fresh params/headers list is
         # built so the source's cached request objects are never mutated.
-        params = [p for p in req.params if p.type != "cookie"]
+        params = [p for p in req.params if p.type != "cookie" and not
+                  (p.type == 'header' and p.name.lower() == 'cookie')]
         params += [Param("cookie", name, value) for name, value in cookies.items()]
         headers = without_headers(req.headers, ["cookie"])
         return replace(req, params=params, headers=headers)
@@ -162,11 +219,31 @@ class Authz(BaseModule):
         idx, label = meta
         results = context.state.setdefault(_CONTEXT_KEY, {})
         results.setdefault(idx, {})[label] = response.status
+        body = response.body.decode('utf-8', 'replace')
+        try:
+            normalized = json.dumps(json.loads(body), sort_keys=True, separators=(',', ':'))
+        except (ValueError, TypeError):
+            normalized = re.sub(r'\s+', ' ', body).strip()
+        details = context.state.setdefault('authz.details', {})
+        details.setdefault(idx, {})[label] = {
+            'status': response.status, 'fingerprint': sha256(normalized.encode()).hexdigest(),
+            'bytes': len(response.body),
+        }
+        if label != _ORIGINAL:
+            for rule in self._rules:
+                if (response.request.method.upper() == rule['method'].upper()
+                        and response.request.url == rule['url'] and label not in rule['allowed']
+                        and 200 <= response.status < 300
+                        and ('contains' not in rule or rule['contains'] in body)):
+                    self.report(response, context, f'[AUTHZ] Unexpected access by {label}: {self._endpoint_label(response.request)}',
+                                evidence={'session': label, 'expected_allowed': rule['allowed'],
+                                          'marker_matched': 'contains' in rule}, confidence='indicator')
         # Matrix cells are observations, delivered to programmatic reporters too.
         context.reporter.report(Finding(
             module=type(self).__name__, request=response.request,
             observation=f"{label}: {response.status}",
-            evidence={"session": label, "status": response.status},
+            evidence={"session": label, "status": response.status,
+                      **(details[idx][label] if self.needs_body else {})},
             terminal_visible=False,
         ))
 
@@ -176,6 +253,8 @@ class Authz(BaseModule):
             return
 
         columns = [_ORIGINAL] + [label for label, _ in self._sessions]
+        if self._anonymous:
+            columns.append('(anonymous)')
         header = ["ENDPOINT"] + columns
         rows = []
         differing = 0
@@ -195,6 +274,13 @@ class Authz(BaseModule):
             differing += row_differs
             rows.append([self._truncate(self._endpoints[idx])] + cells)
 
+        if self._compare_body:
+            for idx, values in context.state.get('authz.details', {}).items():
+                base = values.get(_ORIGINAL)
+                if base and base['bytes'] and 200 <= base['status'] < 300:
+                    for label, value in values.items():
+                        if label != _ORIGINAL and 200 <= value['status'] < 300 and value['fingerprint'] == base['fingerprint']:
+                            context.write(f'[AUTHZ] {self._endpoints[idx]}: {label} matches original normalized body (observation; verify expected access)')
         context.write("[AUTHZ] --- authorisation matrix (status code per user) ---")
         for line in self._render_table(header, rows):
             context.write(f"[AUTHZ] {line}")

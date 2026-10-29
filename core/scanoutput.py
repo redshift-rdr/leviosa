@@ -73,6 +73,7 @@ class ScanReporter:
     def report(self, finding):
         self.terminal.report(finding)
         req = finding.request
-        self.emit("finding", module_class=finding.module, request_id=req.request_id, seed_id=req.seed_id,
+        tool = req.metadata.get("leviosa.tool", self.fields.get("tool"))
+        self.emit("finding", tool=tool, module_class=finding.module, request_id=req.request_id, seed_id=req.seed_id,
                   method=req.method, url=req.url, observation=finding.observation,
                   confidence=finding.confidence, evidence=finding.evidence)

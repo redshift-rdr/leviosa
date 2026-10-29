@@ -42,6 +42,30 @@ class Config:
     human_timing_min: float = 2.0
     human_timing_max: float = 8.0
 
+    auth_check: bool = False
+    auth_check_url: str | None = None
+    auth_success_text: str | None = None
+    auth_mechanism: str = "auto"
+    auth_check_interval: int = 20
+
+    def validate_auth(self) -> None:
+        from urllib.parse import urlsplit
+        if type(self.auth_check) is not bool:
+            raise ValueError("auth_check must be true or false")
+        if not isinstance(self.auth_mechanism, str) or self.auth_mechanism not in {"auto", "cookies", "bearer"}:
+            raise ValueError("auth_mechanism must be auto, cookies or bearer")
+        if type(self.auth_check_interval) is not int or self.auth_check_interval < 1:
+            raise ValueError("auth_check_interval must be a positive integer")
+        if self.auth_success_text is not None and (not isinstance(self.auth_success_text, str) or not self.auth_success_text.strip()):
+            raise ValueError("auth_success_text must be nonempty text")
+        if self.auth_check or self.auth_check_url is not None:
+            if not isinstance(self.auth_check_url, str):
+                raise ValueError("auth_check requires auth_check_url")
+            url = urlsplit(self.auth_check_url)
+            if url.scheme not in {"http", "https"} or not url.hostname or url.username is not None or url.password is not None or url.fragment or any(c.isspace() for c in self.auth_check_url):
+                raise ValueError("auth_check_url must be an HTTP(S) URL without credentials or fragment")
+            url.port
+
     def validate_timing(self) -> None:
         for name in ("human_mode", "random_timing"):
             if type(getattr(self, name)) is not bool:
@@ -85,6 +109,15 @@ def load_config(toml_path: str = "leviosa.toml") -> Config:
         config.timeout = request["timeout"]
     if "follow_redirects" in request:
         config.follow_redirects = request["follow_redirects"]
+    auth = data.get("auth", {})
+    if not isinstance(auth, dict):
+        raise ValueError("auth must be a TOML table")
+    names = {"enabled": "auth_check", "url": "auth_check_url", "success_text": "auth_success_text",
+             "mechanism": "auth_mechanism", "interval": "auth_check_interval"}
+    if auth.keys() - names.keys():
+        raise ValueError("unknown auth configuration option")
+    for key, value in auth.items():
+        setattr(config, names[key], value)
     log = data.get("log", {})
     if "enabled" in log:
         config.log_enabled = log["enabled"]
