@@ -268,4 +268,4 @@ class TestOutput:
 
     async def test_findings_use_namespaced_context_key(self):
         ctx = await run(configured(), [make_response(without("Referrer-Policy"))])
-        assert "securityheaders.findings" in ctx.data
+        assert "securityheaders.findings" in ctx.state

@@ -1,8 +1,11 @@
+from core.tooltags import BurpTool
 from modules.base import BaseModule
 
 
 class PassthroughModule(BaseModule):
     """Sends requests unchanged and produces no output. Use as a copy-paste template."""
+
+    tool = BurpTool.REPEATER
 
     # Passthrough replays requests as-is, so its (typically low-volume) traffic
     # is routed through burp for manual inspection.

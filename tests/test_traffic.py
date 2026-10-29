@@ -192,3 +192,70 @@ class TestCli:
     def test_limit_note(self, db):
         r = self._run(db, "--limit", "1")
         assert "limited to 1" in r.stdout
+
+
+@pytest.fixture
+def activity_db(tmp_path):
+    from core.logdb import _SCHEMA
+    path = tmp_path / 'burp.sqlite'
+    with sqlite3.connect(path) as conn:
+        conn.execute(_SCHEMA)
+        conn.executemany('INSERT INTO ACTIVITY VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [
+            ('127.0.0.1', 'http://t/home', 'GET', 'Repeater', 'GET /home HTTP/1.1\r\n\r\n', '2026-10-29 10:00:00', '200', 'ok'),
+            ('127.0.0.1', 'http://t/api/login', 'POST', 'Scanner', '', '2026-10-29 11:00:00', '500', 'error'),
+            ('127.0.0.1', 'http://t/missing', 'GET', 'Intruder', '', '2026-10-29 12:00:00', '404', ''),
+            ('', 'http://t/failed', 'GET', 'Repeater', '', '2026-10-29 13:00:00', '0', ''),
+        ])
+    return str(path)
+
+
+class TestActivityCli:
+    _run = TestCli._run
+    def test_activity_table(self, activity_db):
+        result = self._run(activity_db)
+        assert result.returncode == 0, result.stderr
+        assert 'DATETIME (LOCAL)' in result.stdout
+        assert 'TOOL' in result.stdout and 'Repeater' in result.stdout
+        assert '4 row(s)' in result.stdout
+
+    @pytest.mark.parametrize('flags,count', [
+        (['--status', '500'], '1'),
+        (['--status-class', '4xx'], '1'),
+        (['--tool', 'Repeater'], '2'),
+        (['--tool', 'Scanner', '--method', 'post', '--path', '/api', '--after', '2026-10-29 10:30:00'], '1'),
+        (['--errors-only'], '1'),
+        (['--before', '2026-10-29 10:30:00'], '1'),
+    ])
+    def test_activity_filters(self, activity_db, flags, count):
+        result = self._run(activity_db, *flags, '--count')
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == count
+
+    def test_module_filter_is_explicitly_unavailable(self, activity_db):
+        result = self._run(activity_db, '--module', 'sqli')
+        assert result.returncode == 1
+        assert '--module is only available for legacy' in result.stderr
+        assert 'Traceback' not in result.stderr
+
+    def test_tool_filter_is_explicitly_unavailable_for_legacy(self, db):
+        result = self._run(db, '--tool', 'Scanner')
+        assert result.returncode == 1
+        assert '--tool requires an ACTIVITY' in result.stderr
+
+    def test_reads_user_example_without_changes(self):
+        import hashlib
+        path = PROJECT_ROOT / 'example_db_log.sqlite'
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        with sqlite3.connect(path) as conn:
+            expected = conn.execute("SELECT COUNT(*) FROM ACTIVITY WHERE BURP_TOOL='Intruder'").fetchone()[0]
+        result = self._run(str(path), '--tool', 'Intruder', '--count')
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == str(expected)
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+
+    def test_uri_special_characters_in_db_path(self, activity_db, tmp_path):
+        import shutil
+        path = tmp_path / 'log?#.sqlite'
+        shutil.copy2(activity_db, path)
+        result = self._run(str(path), '--count')
+        assert result.returncode == 0 and result.stdout.strip() == '4'

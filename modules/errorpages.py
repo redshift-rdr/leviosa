@@ -4,6 +4,7 @@ import re
 from dataclasses import replace
 from urllib.parse import urlparse, urlunparse
 
+from core.tooltags import BurpTool
 from core.models import Param
 from modules.base import BaseModule
 
@@ -99,6 +100,8 @@ class ErrorPages(BaseModule):
     signature seen across the whole run.
     """
 
+    tool = BurpTool.SCANNER
+
     # Bodies are scanned for disclosure signatures, so they must be read.
     needs_body = True
 
@@ -106,13 +109,9 @@ class ErrorPages(BaseModule):
         self._enabled = list(ALL_TECHNIQUES)
         self._long_url_len = 4096
         self._filters = []
-        # Maps id(variant request) -> technique label. Populated as variants are
-        # yielded and popped as each response is analysed, so it stays bounded to
-        # roughly the in-flight window rather than growing with the whole scan.
-        self._techniques: dict[int, str] = {}
 
     def option_parser(self):
-        parser = argparse.ArgumentParser(prog="errorpages", add_help=False)
+        parser = argparse.ArgumentParser(prog="errorpages", add_help=False, allow_abbrev=False)
         parser.add_argument(
             "--techniques", metavar="LIST", default=None,
             help="Comma-separated subset of techniques to run. Available: "
@@ -148,7 +147,7 @@ class ErrorPages(BaseModule):
         enabled = set(self._enabled)
         for req in requests:
             for label, variant in self._induce(req, enabled):
-                self._techniques[id(variant)] = label
+                variant.metadata["errorpages.technique"] = label
                 yield variant
 
     def _induce(self, req, enabled):
@@ -180,7 +179,7 @@ class ErrorPages(BaseModule):
         injectable = [i for i, p in enumerate(req.params) if p.type in _INJECTABLE]
         for i in injectable:
             for payload in _BREAKERS:
-                variant = copy.deepcopy(req)
+                variant = replace(copy.deepcopy(req))
                 variant.params[i].value = payload
                 yield "param-injection", variant
 
@@ -188,7 +187,7 @@ class ErrorPages(BaseModule):
         # Adds a hostile query param, so it induces parse errors even when the
         # request carries no params of its own.
         for payload in _BREAKERS[:3]:
-            variant = copy.deepcopy(req)
+            variant = replace(copy.deepcopy(req))
             variant.params.append(Param(type="query", name="leviosa_test", value=payload))
             yield "junk-param", variant
 
@@ -200,15 +199,14 @@ class ErrorPages(BaseModule):
     async def analyze_one(self, response, context):
         # status == 0 is a network error — nothing was induced.
         if response.status == 0:
-            self._techniques.pop(id(response.request), None)
             return
-        technique = self._techniques.pop(id(response.request), "unknown")
+        technique = response.request.metadata.get("errorpages.technique", "unknown")
         is_error = response.status >= 400
         disclosures = self._disclosures(response) if response.body else []
         if not is_error and not disclosures:
             return
 
-        stats = context.data.setdefault(_CONTEXT_KEY, {"status": {}, "disclosures": {}})
+        stats = context.state.setdefault(_CONTEXT_KEY, {"status": {}, "disclosures": {}})
         stats["status"][response.status] = stats["status"].get(response.status, 0) + 1
         for name in disclosures:
             stats["disclosures"][name] = stats["disclosures"].get(name, 0) + 1
@@ -216,19 +214,20 @@ class ErrorPages(BaseModule):
         parts = [f"induced: {technique}"]
         if disclosures:
             parts.append(f"disclosure: {', '.join(disclosures)}")
-        print(
+        self.report(response, context,
             f"[ERRORPAGES] {response.status} {response.request.method} "
-            f"{response.request.url}  [{' | '.join(parts)}]"
+            f"{response.request.url}  [{' | '.join(parts)}]",
+            evidence={"technique": technique, "disclosures": disclosures}
         )
 
     async def finalize(self, context):
-        stats = context.data.get(_CONTEXT_KEY)
+        stats = context.state.get(_CONTEXT_KEY)
         if not stats:
             return
-        print("[ERRORPAGES] --- summary ---")
+        context.write("[ERRORPAGES] --- summary ---")
         for status, count in sorted(stats["status"].items()):
-            print(f"[ERRORPAGES]   status {status}: {count}")
+            context.write(f"[ERRORPAGES]   status {status}: {count}")
         if stats["disclosures"]:
-            print("[ERRORPAGES]   information disclosure signatures:")
+            context.write("[ERRORPAGES]   information disclosure signatures:")
             for name, count in sorted(stats["disclosures"].items()):
-                print(f"[ERRORPAGES]     {name}: {count}")
+                context.write(f"[ERRORPAGES]     {name}: {count}")

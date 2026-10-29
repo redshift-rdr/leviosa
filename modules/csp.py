@@ -1,5 +1,6 @@
 import argparse
 
+from core.tooltags import BurpTool
 from modules.base import BaseModule
 
 # Namespaced context key for the cross-response tally built in analyze_one and
@@ -58,6 +59,8 @@ class ContentSecurityPolicy(BaseModule):
     Only headers are inspected, so needs_body is False (no bodies downloaded).
     """
 
+    tool = BurpTool.SCANNER
+
     # Header-only module: no need to read response bodies.
     needs_body = False
 
@@ -75,10 +78,7 @@ class ContentSecurityPolicy(BaseModule):
     @staticmethod
     def _header(response, name: str) -> str | None:
         """Case-insensitive header lookup; returns the raw value or None."""
-        for key, value in response.headers.items():
-            if key.lower() == name:
-                return value
-        return None
+        return response.headers.get(name)
 
     @staticmethod
     def _parse_policy(value: str) -> list[tuple[str, list[str]]]:
@@ -146,20 +146,20 @@ class ContentSecurityPolicy(BaseModule):
             return
 
         # Accumulate a deduplicated tally for the finalize() summary.
-        tally = context.data.setdefault(_CONTEXT_KEY, {})
+        tally = context.state.setdefault(_CONTEXT_KEY, {})
         for issue in issues:
             tally[issue] = tally.get(issue, 0) + 1
 
-        print(
+        self.report(response, context,
             f"[CSP] {response.status} {response.request.method} "
-            f"{response.request.url}  {' | '.join(issues)}"
+            f"{response.request.url}  {' | '.join(issues)}", evidence={"issues": issues}
         )
 
     async def finalize(self, context):
-        tally = context.data.get(_CONTEXT_KEY)
+        tally = context.state.get(_CONTEXT_KEY)
         if not tally:
             return
-        print("[CSP] --- Content-Security-Policy issues (unique) ---")
+        context.write("[CSP] --- Content-Security-Policy issues (unique) ---")
         for issue, count in sorted(tally.items()):
             plural = "response" if count == 1 else "responses"
-            print(f"[CSP]   {issue}  ({count} {plural})")
+            context.write(f"[CSP]   {issue}  ({count} {plural})")

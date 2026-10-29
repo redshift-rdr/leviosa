@@ -4,9 +4,12 @@ from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from core.tooltags import BurpTool
 from core.cookies import overrides_from_donor
 from core.models import Param
 from modules.base import BaseModule
+from core.reporting import Finding
+from core.headers import without_headers
 
 # Namespaced context key for the results grid built in analyze_one and rendered
 # in finalize(): {endpoint_index: {column_label: status}}.
@@ -42,6 +45,9 @@ class Authz(BaseModule):
     needs_body is False.
     """
 
+    tool = BurpTool.INTRUDER
+    path_options = {'--session': 'session'}
+
     # Status-only module: the engine skips reading response bodies.
     needs_body = False
     use_burp = True
@@ -49,14 +55,12 @@ class Authz(BaseModule):
     def __init__(self):
         # list of (label, {cookie_name: value})
         self._sessions: list[tuple[str, dict[str, str]]] = []
-        # id(request) -> (endpoint_index, column_label), built during mutate().
-        self._request_meta: dict[int, tuple[int, str]] = {}
         # endpoint_index -> display label ("METHOD url").
         self._endpoints: list[str] = []
         self._filters = []
 
     def option_parser(self):
-        parser = argparse.ArgumentParser(prog="authz", add_help=False)
+        parser = argparse.ArgumentParser(prog="authz", add_help=False, allow_abbrev=False)
         parser.add_argument(
             "--session", metavar="[LABEL=]FILE", action="append", default=[],
             help="Request file whose cookies represent one user's session "
@@ -111,7 +115,6 @@ class Authz(BaseModule):
 
     async def mutate(self, requests, context):
         # Reset correlation state for this run before the engine consumes it.
-        self._request_meta = {}
         self._endpoints = []
         return self._variants(requests)
 
@@ -121,13 +124,13 @@ class Authz(BaseModule):
             self._endpoints.append(self._endpoint_label(req))
 
             # Baseline: the request exactly as captured.
-            self._request_meta[id(req)] = (idx, _ORIGINAL)
-            yield req
+            original = replace(req, metadata={**req.metadata, "authz": (idx, _ORIGINAL)})
+            yield original
 
             # One impersonated variant per session.
             for label, cookies in self._sessions:
                 variant = self._impersonate(req, cookies)
-                self._request_meta[id(variant)] = (idx, label)
+                variant.metadata["authz"] = (idx, label)
                 yield variant
 
     @staticmethod
@@ -147,24 +150,28 @@ class Authz(BaseModule):
         # built so the source's cached request objects are never mutated.
         params = [p for p in req.params if p.type != "cookie"]
         params += [Param("cookie", name, value) for name, value in cookies.items()]
-        headers = [
-            h for h in req.headers
-            if h.partition(":")[0].strip().lower() != "cookie"
-        ]
+        headers = without_headers(req.headers, ["cookie"])
         return replace(req, params=params, headers=headers)
 
     # ----------------------------------------------------------------- analyse
 
     async def analyze_one(self, response, context):
-        meta = self._request_meta.get(id(response.request))
+        meta = response.request.metadata.get("authz")
         if meta is None:
             return  # not one of our variants
         idx, label = meta
-        results = context.data.setdefault(_CONTEXT_KEY, {})
+        results = context.state.setdefault(_CONTEXT_KEY, {})
         results.setdefault(idx, {})[label] = response.status
+        # Matrix cells are observations, delivered to programmatic reporters too.
+        context.reporter.report(Finding(
+            module=type(self).__name__, request=response.request,
+            observation=f"{label}: {response.status}",
+            evidence={"session": label, "status": response.status},
+            terminal_visible=False,
+        ))
 
     async def finalize(self, context):
-        results = context.data.get(_CONTEXT_KEY)
+        results = context.state.get(_CONTEXT_KEY)
         if not results:
             return
 
@@ -188,12 +195,12 @@ class Authz(BaseModule):
             differing += row_differs
             rows.append([self._truncate(self._endpoints[idx])] + cells)
 
-        print("[AUTHZ] --- authorisation matrix (status code per user) ---")
+        context.write("[AUTHZ] --- authorisation matrix (status code per user) ---")
         for line in self._render_table(header, rows):
-            print(f"[AUTHZ] {line}")
-        print("[AUTHZ] * = status differs from (original); "
+            context.write(f"[AUTHZ] {line}")
+        context.write("[AUTHZ] * = status differs from (original); "
               "'-' = no response, 'ERR' = network error")
-        print(f"[AUTHZ] {differing} of {len(rows)} endpoints differ across users")
+        context.write(f"[AUTHZ] {differing} of {len(rows)} endpoints differ across users")
 
     @staticmethod
     def _cell(status) -> str:

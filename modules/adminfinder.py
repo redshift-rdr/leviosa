@@ -3,6 +3,7 @@ import re
 from dataclasses import replace
 from urllib.parse import urlparse, urlunparse
 
+from core.tooltags import BurpTool
 from core.analysers import HeaderAnalyser, RegexAnalyser, StatusCodeAnalyser
 from modules import pathfuzz
 
@@ -28,6 +29,9 @@ class AdminFinder(pathfuzz.PathFuzzer):
     and are additionally flagged when they look like a real admin interface:
     an auth challenge (401 + WWW-Authenticate) or a login/admin page body.
     """
+
+    tool = BurpTool.INTRUDER
+    path_options = {'--admin-wordlist': 'file', '--admin-extra': 'file'}
 
     # Curated list of frequently-seen administrative interface paths.
     DEFAULT_ADMIN_PATHS = [
@@ -105,7 +109,7 @@ class AdminFinder(pathfuzz.PathFuzzer):
         )
 
     def option_parser(self):
-        parser = argparse.ArgumentParser(prog="adminfinder", add_help=False)
+        parser = argparse.ArgumentParser(prog="adminfinder", add_help=False, allow_abbrev=False)
         parser.add_argument(
             "--admin-wordlist", metavar="PATH", default=None,
             help="Replace the built-in admin path list with entries from this file "
@@ -170,7 +174,7 @@ class AdminFinder(pathfuzz.PathFuzzer):
         if self._login_body.matches(response):
             flags.append("login-page")
         suffix = f"  [likely admin: {', '.join(flags)}]" if flags else ""
-        print(
+        self.report(response, context,
             f"[ADMINFINDER] {response.status} {response.request.method} "
             f"{response.request.url}{suffix}"
         )

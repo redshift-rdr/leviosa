@@ -1,10 +1,13 @@
 import asyncio
+import json
 import random
 import sys
 from collections.abc import AsyncIterator, Iterable
+from datetime import datetime
 from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
+from multidict import CIMultiDict, MultiDict
 
 # handle weird characters in cookie key error
 import http.cookies
@@ -13,8 +16,12 @@ http.cookies._is_legal_key = lambda key: bool(key) and not any(
 )
 
 from core.config import Config
+from core.capture import Capture, CapturedRequest, current_capture, trace_config
+from core.headers import parse_headers as _parse_headers, transport_headers
 from core.logdb import TrafficLogger
-from core.models import LeviosaRequest, LeviosaResponse, Param
+from core.models import LeviosaRequest, LeviosaResponse, Param, TrafficRecord
+from core.tooltags import BurpTool
+from core.timing import HumanPacer
 
 
 def resolve_proxy(
@@ -53,25 +60,14 @@ def _split_proxy_auth(url: str) -> tuple[str, aiohttp.BasicAuth | None]:
     return clean, auth
 
 
-def _parse_headers(raw_headers: list[str]) -> dict[str, str]:
-    """Convert raw header strings to a dict, skipping the HTTP request line."""
-    headers = {}
-    for h in raw_headers:
-        if ": " in h:
-            name, _, value = h.partition(": ")
-            # The request line ("GET /path HTTP/1.1") has spaces in the name part
-            if " " not in name:
-                headers[name] = value
-    return headers
-
-
-def _build_kwargs(params: list[Param]) -> tuple[dict, dict[str, str]]:
+def _build_kwargs(params: list[Param]) -> tuple[dict, CIMultiDict[str]]:
     """
     Returns (request_kwargs, extra_headers).
     request_kwargs: keys cookies/json/params/data, populated only when non-empty.
     extra_headers: header-type params merged into the headers dict by the caller.
     """
-    cookies, json_body, query_params, form_data, extra_headers = {}, {}, {}, {}, {}
+    cookies, json_body = {}, {}
+    query_params, form_data, extra_headers = MultiDict(), MultiDict(), CIMultiDict()
     for param in params:
         match param.type:
             case "cookie":
@@ -79,14 +75,18 @@ def _build_kwargs(params: list[Param]) -> tuple[dict, dict[str, str]]:
             case "json":
                 json_body[param.name] = param.value
             case "query":
-                query_params[param.name] = param.value
+                query_params.add(param.name, param.value)
             case "form":
-                form_data[param.name] = param.value
+                form_data.add(param.name, param.value)
             case "header":
-                extra_headers[param.name] = param.value
+                extra_headers.add(param.name, param.value)
+            case _:
+                raise ValueError(f"Unsupported parameter type: {param.type!r}")
     kwargs: dict = {}
     if cookies:
         kwargs["cookies"] = cookies
+    if json_body and form_data:
+        raise ValueError("JSON and form parameters cannot be combined in one body")
     if json_body:
         kwargs["json"] = json_body
     if query_params:
@@ -116,6 +116,22 @@ async def _read_capped(resp: aiohttp.ClientResponse, cap: int) -> bytes:
     return b"".join(chunks)[:cap]
 
 
+def _request_options(request: LeviosaRequest):
+    """Prepare headers and payload options for sending or offline validation."""
+    headers = _parse_headers(request.headers)
+    kwargs, extra_headers = _build_kwargs(request.params)
+    headers.update(extra_headers)
+    if request.body is not None:
+        if "json" in kwargs or "data" in kwargs:
+            raise ValueError("An explicit body cannot be combined with JSON/form parameters")
+        if request.body.kind == "json":
+            kwargs["data"] = json.dumps(request.body.value).encode("utf-8")
+            headers.setdefault("Content-Type", "application/json")
+        else:
+            kwargs["data"] = request.body.value
+    return transport_headers(headers), kwargs
+
+
 async def _send_one(
     session: aiohttp.ClientSession,
     request: LeviosaRequest,
@@ -123,10 +139,12 @@ async def _send_one(
     read_body: bool,
     proxy: str | None,
     proxy_auth: aiohttp.BasicAuth | None,
+    capture_traffic: bool = False,
 ) -> LeviosaResponse:
-    headers = _parse_headers(request.headers)
-    kwargs, extra_headers = _build_kwargs(request.params)
-    headers.update(extra_headers)
+    headers, kwargs = _request_options(request)
+    capture = Capture(config.max_body_bytes, _read_capped) if capture_traffic else None
+    token = current_capture.set(capture)
+    attempted_at = datetime.now()
     try:
         async with session.request(
             method=request.method,
@@ -137,12 +155,17 @@ async def _send_one(
             allow_redirects=config.follow_redirects,
             **kwargs,
         ) as resp:
-            body = await _read_capped(resp, config.max_body_bytes) if read_body else b""
+            body = await _read_capped(resp, config.max_body_bytes) if read_body or capture_traffic else b""
+            if capture is not None and capture.active is not None:
+                capture.active.status = resp.status
+                capture.active.response_body = body
+                capture.active.response_encoding = resp.charset
             return LeviosaResponse(
                 status=resp.status,
-                headers=dict(resp.headers),
-                body=body,
+                headers=CIMultiDict(resp.headers),
+                body=body if read_body else b"",
                 request=request,
+                traffic=capture.records if capture else [],
             )
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
         if config.verbose:
@@ -150,7 +173,12 @@ async def _send_one(
                 f"[leviosa] error: {request.method} {request.url}: {e}",
                 file=sys.stderr,
             )
-        return LeviosaResponse(status=0, headers={}, body=b"", request=request)
+        if capture is not None and capture.active is None:
+            capture.records.append(TrafficRecord(request.url, request.method, attempted_at))
+        return LeviosaResponse(status=0, headers={}, body=b"", request=request,
+                               traffic=capture.records if capture else [])
+    finally:
+        current_capture.reset(token)
 
 
 async def send(
@@ -162,6 +190,8 @@ async def send(
     proxy_auth: aiohttp.BasicAuth | None = None,
     logger: TrafficLogger | None = None,
     module: str | None = None,
+    tool: BurpTool | str | None = None,
+    pacer: HumanPacer | None = None,
 ) -> AsyncIterator[LeviosaResponse]:
     """
     Send requests and yield each LeviosaResponse as it completes.
@@ -171,7 +201,13 @@ async def send(
     order). Peak memory is therefore O(concurrency), not O(total requests) — the
     caller consumes and drops each response before the next slot is refilled.
 
-    When `config.random_timing` is True requests are sent strictly sequentially
+    Human mode paces Repeater traffic sequentially, using a shared run-scoped
+    pacer across module batches. Intruder and Scanner use the normal window.
+    The first Repeater action is immediate; elapsed analysis/scan time counts
+    towards the next interval. Redirects remain part of the same action.
+
+    When `config.random_timing` is True it overrides human mode: all requests
+    are sent strictly sequentially
     with a random pause (uniform between `random_timing_min` and
     `random_timing_max` seconds) between each one, mimicking the cadence of a
     human tester manually reviewing responses.
@@ -181,32 +217,49 @@ async def send(
     is caught locally (PEP 479 safe).
 
     `proxy`/`proxy_auth` are applied to every request (resolve_proxy decides
-    them per batch). If `logger` is given, every completed response is written to
-    the sqlite traffic log — this is the one choke point all traffic passes
-    through, so traffic that bypasses burp is still recorded.
+    them per batch). If `logger` is given, prepared requests and capped response
+    bodies are captured for each HTTP exchange (including redirect hops), even
+    with read_body=False. Captures are discarded after their ACTIVITY rows are
+    persisted; modules still receive an empty body when read_body=False.
+
+    `tool` selects BURP_TOOL for every exchange in this batch. An explicit
+    value overrides config.tool; raw dispatch otherwise defaults to Repeater.
     """
+    config.validate_timing()
+    if tool is None:
+        tool = config.tool if config.tool is not None else BurpTool.REPEATER
+    tool = BurpTool(tool)
+    human = config.human_mode and not config.random_timing and tool == BurpTool.REPEATER
+    if human and pacer is None:
+        pacer = HumanPacer()
     timeout = aiohttp.ClientTimeout(total=config.timeout)
     connector = aiohttp.TCPConnector(ssl=False, limit=config.concurrency)
 
-    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-        if config.random_timing:
+    capture_options = {"request_class": CapturedRequest, "trace_configs": [trace_config()]} if logger else {}
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout, **capture_options) as session:
+        if config.random_timing or human:
             first = True
             for req in requests:
-                if not first:
+                if human:
+                    await pacer.wait(config.human_timing_min, config.human_timing_max, config.verbose)
+                elif not first:
                     delay = random.uniform(config.random_timing_min, config.random_timing_max)
                     if config.verbose:
                         print(f"[leviosa] random-timing: sleeping {delay:.2f}s", file=sys.stderr)
                     await asyncio.sleep(delay)
                 first = False
-                resp = await _send_one(session, req, config, read_body, proxy, proxy_auth)
+                resp = await _send_one(session, req, config, read_body, proxy, proxy_auth, logger is not None)
+                if human:
+                    pacer.completed()
                 if logger is not None:
-                    logger.log(resp, module=module, proxy=proxy)
+                    logger.log(resp, tool=tool)
+                    resp.traffic.clear()
                 yield resp
             return
 
         def _spawn(req: LeviosaRequest) -> asyncio.Task:
             return asyncio.create_task(
-                _send_one(session, req, config, read_body, proxy, proxy_auth)
+                _send_one(session, req, config, read_body, proxy, proxy_auth, logger is not None)
             )
 
         req_iter = iter(requests)
@@ -227,7 +280,8 @@ async def send(
                 for t in done:
                     resp = t.result()
                     if logger is not None:
-                        logger.log(resp, module=module, proxy=proxy)
+                        logger.log(resp, tool=tool)
+                        resp.traffic.clear()
                     yield resp
                 # Refill one slot per completed task.
                 for _ in range(len(done)):

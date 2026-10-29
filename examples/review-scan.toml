@@ -1,0 +1,28 @@
+name = "application-review"
+target = "http://127.0.0.1:8080/"
+database = "review.sqlite"
+# Optional: remove this line for console-only findings and progress.
+results = "review.jsonl"
+no_proxy = true
+human_mode = true
+on_error = "continue"
+
+[[steps]]
+name = "baseline replay"
+module = "passthrough"
+
+[[steps]]
+name = "security headers"
+module = "securityheaders"
+
+[[steps]]
+name = "path discovery"
+module = "pathfuzz"
+args = ["--wordlist", "paths.txt", "--recursive"]
+filters = { methods = ["GET"] }
+
+[[steps]]
+name = "core headers as a manual check"
+module = "securityheaders"
+args = ["--no-recommended"]
+tool = "Repeater"

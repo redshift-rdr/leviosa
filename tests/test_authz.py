@@ -40,7 +40,7 @@ async def drive(module, seeds, status_map):
     ctx = LeviosaContext()
     variants = list(await module.mutate(seeds, ctx))
     for v in variants:
-        idx, label = module._request_meta[id(v)]
+        idx, label = v.metadata["authz"]
         await module.analyze_one(response_for(v, status_map[(idx, label)]), ctx)
     await module.finalize(ctx)
     return ctx
@@ -167,12 +167,13 @@ class TestMutate:
         m = self._module(tmp_path)
         req = make_request()
         variants = list(await m.mutate([req], LeviosaContext()))
-        assert variants[0] is req
+        assert variants[0] == req
+        assert variants[0].seed_id == req.seed_id
 
     async def test_meta_maps_each_variant(self, tmp_path):
         m = self._module(tmp_path)
         variants = list(await m.mutate([make_request(url="http://x/")], LeviosaContext()))
-        labels = [m._request_meta[id(v)][1] for v in variants]
+        labels = [v.metadata["authz"][1] for v in variants]
         assert labels == ["(original)", "admin", "guest"]
         assert m._endpoints == ["GET /"]
 
@@ -252,4 +253,4 @@ class TestTable:
         ctx = await drive(m, [make_request()], {
             (0, "(original)"): 200, (0, "admin"): 200, (0, "guest"): 200,
         })
-        assert "authz.results" in ctx.data
+        assert "authz.results" in ctx.state

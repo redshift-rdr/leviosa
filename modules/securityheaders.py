@@ -2,6 +2,7 @@ import argparse
 import re
 from urllib.parse import urlsplit
 
+from core.tooltags import BurpTool
 from modules.base import BaseModule
 
 # Namespaced context key for the cross-response tally built in analyze_one and
@@ -58,6 +59,8 @@ class SecurityHeaders(BaseModule):
     Only headers are inspected, so needs_body is False (no bodies downloaded).
     """
 
+    tool = BurpTool.SCANNER
+
     # Header-only module: no need to read response bodies.
     needs_body = False
 
@@ -67,7 +70,7 @@ class SecurityHeaders(BaseModule):
         self._filters = []
 
     def option_parser(self):
-        parser = argparse.ArgumentParser(prog="securityheaders", add_help=False)
+        parser = argparse.ArgumentParser(prog="securityheaders", add_help=False, allow_abbrev=False)
         parser.add_argument(
             "--hsts-min-age", type=int, default=_DEFAULT_HSTS_MIN_AGE, metavar="SECONDS",
             help="Minimum acceptable HSTS max-age in seconds "
@@ -96,10 +99,7 @@ class SecurityHeaders(BaseModule):
     @staticmethod
     def _get(response, name: str) -> str | None:
         """Case-insensitive header lookup; returns the raw value or None."""
-        for key, value in response.headers.items():
-            if key.lower() == name:
-                return value
-        return None
+        return response.headers.get(name)
 
     def _has_frame_ancestors(self, response) -> bool:
         """True if the CSP header declares a frame-ancestors directive."""
@@ -193,20 +193,20 @@ class SecurityHeaders(BaseModule):
             return
 
         # Accumulate a deduplicated tally for the finalize() summary.
-        tally = context.data.setdefault(_CONTEXT_KEY, {})
+        tally = context.state.setdefault(_CONTEXT_KEY, {})
         for issue in issues:
             tally[issue] = tally.get(issue, 0) + 1
 
-        print(
+        self.report(response, context,
             f"[SECHEADERS] {response.status} {response.request.method} "
-            f"{response.request.url}  {' | '.join(issues)}"
+            f"{response.request.url}  {' | '.join(issues)}", evidence={"issues": issues}
         )
 
     async def finalize(self, context):
-        tally = context.data.get(_CONTEXT_KEY)
+        tally = context.state.get(_CONTEXT_KEY)
         if not tally:
             return
-        print("[SECHEADERS] --- security header issues (unique) ---")
+        context.write("[SECHEADERS] --- security header issues (unique) ---")
         for issue, count in sorted(tally.items()):
             plural = "response" if count == 1 else "responses"
-            print(f"[SECHEADERS]   {issue}  ({count} {plural})")
+            context.write(f"[SECHEADERS]   {issue}  ({count} {plural})")

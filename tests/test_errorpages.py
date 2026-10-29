@@ -25,7 +25,7 @@ def induce(module, req):
     """Return {technique: [variant, ...]} from the module's lazy variant stream."""
     out: dict[str, list] = {}
     for variant in module._variants([req]):
-        label = module._techniques[id(variant)]
+        label = variant.metadata["errorpages.technique"]
         out.setdefault(label, []).append(variant)
     return out
 
@@ -194,7 +194,7 @@ class TestAnalyze:
     async def test_error_status_reported_with_technique(self, capsys):
         m = ErrorPages()
         req = make_request("http://example.com/app/x", method="GET")
-        m._techniques[id(req)] = "not-found"
+        req.metadata["errorpages.technique"] = "not-found"
         await m.analyze_one(make_response(req, status=404), LeviosaContext())
         out = capsys.readouterr().out
         assert "[ERRORPAGES] 404 GET http://example.com/app/x" in out
@@ -203,7 +203,7 @@ class TestAnalyze:
     async def test_disclosure_on_200_is_reported(self, capsys):
         m = ErrorPages()
         req = make_request()
-        m._techniques[id(req)] = "param-injection"
+        req.metadata["errorpages.technique"] = "param-injection"
         body = b"<b>Fatal error</b>: on line 7"
         await m.analyze_one(make_response(req, status=200, body=body), LeviosaContext())
         out = capsys.readouterr().out
@@ -213,24 +213,24 @@ class TestAnalyze:
     async def test_clean_non_error_not_reported(self, capsys):
         m = ErrorPages()
         req = make_request()
-        m._techniques[id(req)] = "not-found"
+        req.metadata["errorpages.technique"] = "not-found"
         await m.analyze_one(make_response(req, status=200, body=b"ok"), LeviosaContext())
         assert capsys.readouterr().out == ""
 
     async def test_network_error_skipped(self, capsys):
         m = ErrorPages()
         req = make_request()
-        m._techniques[id(req)] = "bad-method"
+        req.metadata["errorpages.technique"] = "bad-method"
         await m.analyze_one(make_response(req, status=0), LeviosaContext())
         assert capsys.readouterr().out == ""
 
-    async def test_technique_map_entry_consumed(self):
+    async def test_technique_metadata_retained_for_reporting(self):
         m = ErrorPages()
         req = make_request()
-        m._techniques[id(req)] = "not-found"
+        req.metadata["errorpages.technique"] = "not-found"
         await m.analyze_one(make_response(req, status=404), LeviosaContext())
         # Popped after analysis so the map stays bounded.
-        assert id(req) not in m._techniques
+        assert req.metadata["errorpages.technique"] == "not-found"
 
     async def test_finalize_summarises_status_and_disclosures(self, capsys):
         m = ErrorPages()
@@ -241,7 +241,7 @@ class TestAnalyze:
             (500, b"You have an error in your SQL syntax", "param-injection"),
         ]:
             req = make_request()
-            m._techniques[id(req)] = tech
+            req.metadata["errorpages.technique"] = tech
             await m.analyze_one(make_response(req, status=status, body=body), ctx)
         capsys.readouterr()  # discard per-response lines
         await m.finalize(ctx)
@@ -260,6 +260,6 @@ class TestAnalyze:
         m = ErrorPages()
         ctx = LeviosaContext()
         req = make_request()
-        m._techniques[id(req)] = "not-found"
+        req.metadata["errorpages.technique"] = "not-found"
         await m.analyze_one(make_response(req, status=404, body=b"x"), ctx)
-        assert "errorpages.stats" in ctx.data
+        assert "errorpages.stats" in ctx.state

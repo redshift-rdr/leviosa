@@ -119,7 +119,7 @@ class TestAnalyze:
         out = capsys.readouterr().out
         assert "reflects arbitrary origin" in out
         assert _DEFAULT_EVIL_ORIGIN in out
-        assert "cors.findings" in ctx.data
+        assert "cors.findings" in ctx.state
 
     async def test_reflection_with_credentials_flagged(self, capsys):
         m = Cors()

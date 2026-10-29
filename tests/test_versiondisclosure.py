@@ -197,4 +197,4 @@ class TestOutput:
     async def test_inventory_uses_namespaced_context_key(self):
         m = VersionDisclosure()
         ctx = await run(m, [make_response({"Server": "nginx/1.18.0"})])
-        assert "versiondisclosure.inventory" in ctx.data
+        assert "versiondisclosure.inventory" in ctx.state

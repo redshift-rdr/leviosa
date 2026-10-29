@@ -2,6 +2,7 @@ import argparse
 import re
 from dataclasses import replace
 
+from core.tooltags import BurpTool
 from modules.base import BaseModule
 
 # Namespaced context key for the results grid built in analyze_one and reported
@@ -95,6 +96,9 @@ class SqlInjection(BaseModule):
     inspected and replayed by hand.
     """
 
+    tool = BurpTool.SCANNER
+    path_options = {'--payloads': 'file'}
+
     # Needs the response body to scan for SQL error strings.
     needs_body = True
     # Route through burp so the (relatively low-volume) probe traffic is easy to
@@ -109,13 +113,10 @@ class SqlInjection(BaseModule):
             (dbms, [re.compile(p, re.IGNORECASE) for p in pats])
             for dbms, pats in _SIGNATURES
         ]
-        # id(request) -> (endpoint_index, param_name|None, param_type|None, payload|None)
-        self._meta: dict[int, tuple] = {}
-        self._endpoints: list[str] = []
         self._filters = []
 
     def option_parser(self):
-        parser = argparse.ArgumentParser(prog="sqli", add_help=False)
+        parser = argparse.ArgumentParser(prog="sqli", add_help=False, allow_abbrev=False)
         parser.add_argument(
             "--payloads", metavar="FILE", default=None,
             help="File of injection payloads, one per line (default: a built-in "
@@ -150,27 +151,22 @@ class SqlInjection(BaseModule):
     # ------------------------------------------------------------------ mutate
 
     async def mutate(self, requests, context):
-        self._meta = {}
-        self._endpoints = []
         return self._variants(requests)
 
     def _variants(self, requests):
-        for req in requests:
-            idx = len(self._endpoints)
-            self._endpoints.append(f"{req.method} {req.url}")
-
-            # Baseline: the unmodified request, sent first as the FP reference.
-            self._meta[id(req)] = (idx, None, None, None)
-            yield req
-
+        for idx, req in enumerate(requests):
             injectable = [
                 (i, p) for i, p in enumerate(req.params)
                 if p.type in self._param_types
             ]
+            total = 1 + len(injectable) * len(self._payloads)
+            original = replace(req, metadata={**req.metadata,
+                "sqli": (idx, None, None, None), "sqli.total": total})
+            yield original
             for i, param in injectable:
                 for payload in self._payloads:
-                    variant = self._inject(req, i, payload)
-                    self._meta[id(variant)] = (idx, param.name, param.type, payload)
+                    variant = self._inject(original, i, payload)
+                    variant.metadata["sqli"] = (idx, param.name, param.type, payload)
                     yield variant
 
     def _inject(self, req, target_index: int, payload: str):
@@ -178,7 +174,7 @@ class SqlInjection(BaseModule):
         # a new Param object; other Params are shared read-only (never mutated),
         # so no deepcopy is needed and siblings can't be corrupted.
         new_params = [
-            replace(p, value=(p.value + payload) if self._append else payload)
+            replace(p, value=(str(p.value) + payload) if self._append else payload)
             if i == target_index else p
             for i, p in enumerate(req.params)
         ]
@@ -203,7 +199,7 @@ class SqlInjection(BaseModule):
         return collapsed[:80]
 
     async def analyze_one(self, response, context):
-        meta = self._meta.get(id(response.request))
+        meta = response.request.metadata.get("sqli")
         if meta is None:
             return  # not one of our variants
         idx, name, ptype, payload = meta
@@ -211,62 +207,64 @@ class SqlInjection(BaseModule):
         text = response.body.decode("utf-8", "ignore") if response.body else ""
         matched = self._matched_dbms(text)
 
-        results = context.data.setdefault(_CONTEXT_KEY, {})
-        entry = results.setdefault(idx, {"baseline": set(), "baseline_status": None, "hits": []})
+        results = context.state.setdefault(_CONTEXT_KEY, {})
+        entry = results.setdefault(idx, {"baseline": set(), "baseline_status": None,
+            "hits": [], "remaining": response.request.metadata["sqli.total"]})
 
         if name is None:  # baseline
             entry["baseline"] = {dbms for dbms, _ in matched}
             entry["baseline_status"] = response.status
-        else:
+        elif matched or response.status == 500:
             entry["hits"].append({
                 "param": name, "ptype": ptype, "payload": payload,
-                "status": response.status, "matched": matched,
+                "status": response.status, "matched": matched, "response": replace(response, body=b""),
             })
 
-    async def finalize(self, context):
-        results = context.data.get(_CONTEXT_KEY)
-        if not results:
-            return
+        entry["remaining"] -= 1
+        if entry["remaining"] == 0:
+            self._report_seed(entry, context)
+            del results[idx]
 
-        lines: list[str] = []
-        # Dedup keys so many payloads triggering the same DBMS on the same param
-        # collapse to a single finding.
-        seen_error: set[tuple] = set()
-        seen_500: set[tuple] = set()
-
-        for idx in sorted(results):
-            entry = results[idx]
-            baseline = entry["baseline"]
-            base_status = entry["baseline_status"]
-            endpoint = self._endpoints[idx]
-            for hit in entry["hits"]:
-                new = [(dbms, snip) for dbms, snip in hit["matched"] if dbms not in baseline]
-                if new:
-                    for dbms, snip in new:
-                        key = (idx, hit["param"], hit["ptype"], dbms)
-                        if key in seen_error:
-                            continue
-                        seen_error.add(key)
-                        lines.append(
-                            f"[SQLI] {dbms} error — {endpoint}  "
-                            f"param '{hit['param']}' ({hit['ptype']})  "
-                            f"payload {hit['payload']!r}  :: {snip}"
-                        )
-                elif hit["status"] == 500 and base_status not in (None, 500):
-                    key = (idx, hit["param"], hit["ptype"])
-                    if key in seen_500:
+    def _report_seed(self, entry, context):
+        baseline = entry["baseline"]
+        base_status = entry["baseline_status"]
+        seen_error, seen_500 = set(), set()
+        for hit in entry["hits"]:
+            response = hit["response"]
+            endpoint = f"{response.request.method} {response.request.url}"
+            new = [(dbms, snip) for dbms, snip in hit["matched"] if dbms not in baseline]
+            observations = []
+            if new:
+                for dbms, snip in new:
+                    key = (hit["param"], hit["ptype"], dbms)
+                    if key in seen_error:
                         continue
+                    seen_error.add(key)
+                    observations.append((
+                        f"[SQLI] {dbms} error — {endpoint}  "
+                        f"param '{hit['param']}' ({hit['ptype']})  "
+                        f"payload {hit['payload']!r}  :: {snip}", "error"))
+            elif hit["status"] == 500 and base_status not in (None, 0, 500):
+                key = (hit["param"], hit["ptype"])
+                if key not in seen_500:
                     seen_500.add(key)
-                    lines.append(
+                    observations.append((
                         f"[SQLI] HTTP 500 introduced (baseline {base_status}) — "
                         f"{endpoint}  param '{hit['param']}' ({hit['ptype']})  "
-                        f"payload {hit['payload']!r}  (possible SQLi, verify manually)"
-                    )
+                        f"payload {hit['payload']!r}  (possible SQLi, verify manually)", "status"))
+            for observation, kind in observations:
+                totals = context.state.setdefault("sqli.totals", {"error": 0, "status": 0})
+                if not any(totals.values()):
+                    context.write("[SQLI] --- SQL injection indicators ---")
+                totals[kind] += 1
+                self.report(response, context, observation, evidence={
+                    "parameter": hit["param"], "location": hit["ptype"],
+                    "payload": hit["payload"], "baseline_status": base_status,
+                    "signatures": hit["matched"],
+                }, confidence="indicator")
 
-        if not lines:
-            return
-        print("[SQLI] --- SQL injection indicators ---")
-        for line in lines:
-            print(line)
-        print(f"[SQLI] {len(seen_error)} confirmed error-based, "
-              f"{len(seen_500)} error-code-only indicator(s)")
+    async def finalize(self, context):
+        totals = context.state.get("sqli.totals")
+        if totals:
+            context.write(f"[SQLI] {totals['error']} confirmed error-based, "
+                          f"{totals['status']} error-code-only indicator(s)")

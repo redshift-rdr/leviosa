@@ -1,6 +1,7 @@
 import argparse
 import re
 
+from core.tooltags import BurpTool
 from modules.base import BaseModule
 
 # Namespaced context key for the cross-response inventory built in analyze_one
@@ -34,6 +35,8 @@ class VersionDisclosure(BaseModule):
 
     Only headers are inspected, so needs_body is False (no bodies downloaded).
     """
+
+    tool = BurpTool.SCANNER
 
     # Curated set of headers known to disclose software and/or version info.
     # Matched case-insensitively; the original casing here is used for display.
@@ -88,7 +91,7 @@ class VersionDisclosure(BaseModule):
         self._filters = []
 
     def option_parser(self):
-        parser = argparse.ArgumentParser(prog="versiondisclosure", add_help=False)
+        parser = argparse.ArgumentParser(prog="versiondisclosure", add_help=False, allow_abbrev=False)
         parser.add_argument(
             "--extra-header", metavar="NAME", action="append", default=[],
             help="Additional header name to always report if present (repeatable)",
@@ -137,22 +140,22 @@ class VersionDisclosure(BaseModule):
             return
 
         # Accumulate a deduplicated inventory for the finalize() summary.
-        inventory = context.data.setdefault(_CONTEXT_KEY, {})
+        inventory = context.state.setdefault(_CONTEXT_KEY, {})
         for name, value in hits:
             inventory[(name, value)] = inventory.get((name, value), 0) + 1
 
         disclosed = " | ".join(f"{name}: {value}" for name, value in hits)
-        print(
+        self.report(response, context,
             f"[VERSIONDISCLOSURE] {response.status} {response.request.method} "
-            f"{response.request.url}  {disclosed}"
+            f"{response.request.url}  {disclosed}", evidence={"headers": hits}
         )
 
     async def finalize(self, context):
-        inventory = context.data.get(_CONTEXT_KEY)
+        inventory = context.state.get(_CONTEXT_KEY)
         if not inventory:
             return
-        print("[VERSIONDISCLOSURE] --- disclosed software/versions (unique) ---")
+        context.write("[VERSIONDISCLOSURE] --- disclosed software/versions (unique) ---")
         # Sort by header name then value for stable, readable output.
         for (name, value), count in sorted(inventory.items()):
             plural = "response" if count == 1 else "responses"
-            print(f"[VERSIONDISCLOSURE]   {name}: {value}  ({count} {plural})")
+            context.write(f"[VERSIONDISCLOSURE]   {name}: {value}  ({count} {plural})")

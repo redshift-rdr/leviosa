@@ -2,6 +2,7 @@ import argparse
 from dataclasses import replace
 from urllib.parse import urlparse, urlunparse
 
+from core.tooltags import BurpTool
 from core.analysers import StatusCodeAnalyser
 from modules.base import BaseModule
 
@@ -22,6 +23,9 @@ class PathFuzzer(BaseModule):
              http://example.com/home/word/
     """
 
+    tool = BurpTool.INTRUDER
+    path_options = {'--wordlist': 'file'}
+
     # Path fuzzing only inspects status codes, so the engine can skip reading
     # response bodies entirely.
     needs_body = False
@@ -34,7 +38,7 @@ class PathFuzzer(BaseModule):
         self._filters = []
 
     def option_parser(self):
-        parser = argparse.ArgumentParser(prog="pathfuzz", add_help=False)
+        parser = argparse.ArgumentParser(prog="pathfuzz", add_help=False, allow_abbrev=False)
         parser.add_argument("--wordlist", required=True, metavar="PATH",
                             help="Path to wordlist file (one entry per line)")
         parser.add_argument("--keyword", default="FUZZ", metavar="KW",
@@ -92,4 +96,4 @@ class PathFuzzer(BaseModule):
 
     async def analyze_one(self, response, context):
         if not self._skip.matches(response):
-            print(f"[PATHFUZZ] {response.status} {response.request.method} {response.request.url}")
+            self.report(response, context, f"[PATHFUZZ] {response.status} {response.request.method} {response.request.url}")

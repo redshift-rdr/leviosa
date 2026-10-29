@@ -1,8 +1,9 @@
 import json
+import base64
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
-from core.models import LeviosaRequest, Param
+from core.models import LeviosaRequest, Param, RequestBody
 
 
 def parse_url(url: str) -> list[LeviosaRequest]:
@@ -27,6 +28,17 @@ def parse_request_file(path: str) -> list[LeviosaRequest]:
         data = json.load(f)
     requests = []
     for item in data:
+        body = None
+        if "body" in item:
+            raw = item["body"]
+            value = raw["value"]
+            if raw.get("encoding") == "base64":
+                if raw["kind"] != "raw":
+                    raise ValueError("base64 encoding is only valid for a raw body")
+                value = base64.b64decode(value, validate=True)
+            elif raw.get("encoding") not in (None, "utf-8"):
+                raise ValueError("Unsupported body encoding")
+            body = RequestBody(raw["kind"], value)
         params = [
             Param(type=p["type"], name=p["name"], value=p["value"])
             for p in item.get("params", [])
@@ -37,6 +49,7 @@ def parse_request_file(path: str) -> list[LeviosaRequest]:
             headers=item.get("headers", []),
             params=params,
             hashkey=item.get("hashkey"),
+            body=body,
         ))
     return requests
 

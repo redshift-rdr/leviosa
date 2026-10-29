@@ -3,6 +3,7 @@ import re
 from dataclasses import replace
 from urllib.parse import urlparse, urlunparse
 
+from core.tooltags import BurpTool
 from core.analysers import RegexAnalyser
 from modules import pathfuzz
 
@@ -31,6 +32,9 @@ class SensitiveFiles(pathfuzz.PathFuzzer):
     A curated built-in wordlist is used by default. Replace it with
     --sensitive-wordlist, or add extra paths with --sensitive-extra.
     """
+
+    tool = BurpTool.INTRUDER
+    path_options = {'--sensitive-wordlist': 'file', '--sensitive-extra': 'file'}
 
     # Directory entries end with "/"; file entries do not.
     DEFAULT_SENSITIVE_PATHS = [
@@ -137,7 +141,7 @@ class SensitiveFiles(pathfuzz.PathFuzzer):
         ]
 
     def option_parser(self):
-        parser = argparse.ArgumentParser(prog="sensitivefiles", add_help=False)
+        parser = argparse.ArgumentParser(prog="sensitivefiles", add_help=False, allow_abbrev=False)
         parser.add_argument(
             "--sensitive-wordlist", metavar="PATH", default=None,
             help="Replace the built-in sensitive path list with entries from this "
@@ -204,7 +208,7 @@ class SensitiveFiles(pathfuzz.PathFuzzer):
             return
         flags = [name for name, an in self._content_flags if an.matches(response)]
         suffix = f"  [exposed: {', '.join(flags)}]" if flags else ""
-        print(
+        self.report(response, context,
             f"[SENSITIVEFILES] {response.status} {response.request.method} "
             f"{response.request.url}{suffix}"
         )

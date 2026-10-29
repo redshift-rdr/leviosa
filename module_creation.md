@@ -1,6 +1,6 @@
 # leviosa — Module Creation Reference
 
-This document contains everything needed to write a module for **leviosa**, a Python async CLI web penetration testing tool. Modules live in `modules/<name>.py` and are loaded at runtime.
+This document contains everything needed to write a module for **leviosa**, a Python async CLI web penetration testing tool. Built-ins live in the installed `modules` package. Custom modules load from an explicit `--modules-dir PATH`, independently of the working directory.
 
 ---
 
@@ -26,7 +26,7 @@ core/
 class Param:
     type: str    # "cookie" | "json" | "query" | "form" | "header"
     name: str
-    value: str
+    value: Any   # JSON values can be nested or typed
 
 @dataclass
 class LeviosaRequest:
@@ -35,20 +35,43 @@ class LeviosaRequest:
     headers: list[str]     # raw strings, e.g. ["Host: example.com", "Accept: */*"]
     params: list[Param]
     hashkey: int | None = None
+    body: RequestBody | None = None  # RequestBody("raw", str/bytes) or RequestBody("json", value)
+    request_id: str        # generated for each request, including replace() copies
+    seed_id: str           # shared across variants of a seed
+    metadata: dict         # private probe labels; copied by replace()
 
 @dataclass
 class LeviosaResponse:
     status: int            # HTTP status code; 0 means a network/connection error
-    headers: dict[str, str]
+    headers: CIMultiDict[str]  # case-insensitive get(); getall() preserves duplicates
     body: bytes
     request: LeviosaRequest  # back-reference to the request that produced this response
 
 @dataclass
 class LeviosaContext:
-    data: dict             # shared mutable dict across all modules in a run
+    data: dict             # explicitly shared across modules
+    state: dict            # fresh private state for each module invocation
+    reporter: Reporter     # report(Finding) and write(str) output sink
 ```
 
-`LeviosaContext.data` is a plain dict shared across every module in a single run. Use namespaced keys to avoid collisions, e.g. `context.data["mymodule.found_urls"]`.
+Use `context.state` for private aggregation. The runner isolates it for every
+module invocation, including repeated runs of the same instance. Use namespaced
+`context.data` keys only for intentional cross-module sharing.
+
+Emit findings with `self.report(response, context, observation, evidence={...},
+confidence="observation")`. `Finding` includes the module, affected request,
+observation, evidence and confidence. The default reporter keeps terminal output;
+programmatic callers can supply `LeviosaContext(reporter=custom_reporter)`.
+Reporters implement `report(finding)` and `write(message)`; `context.write()`
+emits summary text. They need not retain findings in memory.
+
+Use `dataclasses.replace(req, ...)` to create variants. It generates a new
+request ID, retains the seed ID and copies the metadata dictionary. Put probe
+labels in `variant.metadata` and read `response.request.metadata` on completion.
+Copy nested values before modifying them. Do not correlate through `id(req)`.
+Explicit bodies are mutually exclusive with JSON/form params. Repeated query,
+form and header fields retain their order; response headers provide `getall()`.
+Existing request-file syntax remains valid; README shows explicit body syntax.
 
 ---
 
@@ -59,8 +82,8 @@ class LeviosaContext:
 
 class BaseModule(ABC):
     # Whether analyze_one needs the response body. When False the engine skips
-    # reading bodies entirely (response.body is b""), keeping status-only
-    # modules cheap and avoiding downloading large artefacts. Default True.
+    # passing bodies to the module (response.body is b""), while traffic
+    # logging still captures a capped body. With --no-log, reads are skipped.
     needs_body: bool = True
 
     # Whether this module's traffic is routed through burpsuite. Default False:
@@ -97,8 +120,8 @@ class BaseModule(ABC):
         context: LeviosaContext,
     ) -> None:
         """
-        Called once per response, as each one completes. Print findings to
-        stdout. Default implementation is a no-op.
+        Called once per response, as each one completes. Emit findings with
+        self.report(response, context, message). Default implementation is a no-op.
         """
 
     async def finalize(self, context: LeviosaContext) -> None:
@@ -110,14 +133,59 @@ class BaseModule(ABC):
 
 ### Rules
 
-- **One subclass per file.** The loader scans for exactly one `BaseModule` subclass in the file. Defining two raises a `ValueError`.
+- **One subclass per file.** The loader scans for exactly one concrete `BaseModule` subclass defined in the file; imported parents are ignored. Defining two raises a `ValueError`.
 - **File name = module name.** A module at `modules/sqli.py` is loaded with `--module sqli`.
 - **`mutate` is required.** It is the only abstract method. If you have nothing to mutate, `return requests`.
 - **Each module receives the original requests**, not the output of a previous module. Mutations do not chain between modules.
-- **`analyze_one` output goes to stdout.** Use `print()`. Prefix lines with `[MODULENAME]` by convention.
-- **Responses stream in completion order, one at a time.** `analyze_one` never sees the whole list. To compare across responses (baseline, counts, diffs) accumulate on `context.data` during `analyze_one`, then act in `finalize`.
-- **Set `needs_body = False`** if you only inspect status/headers — the engine then never reads the body (`response.body` is `b""`). With the default `needs_body = True`, bodies are read up to `config.max_body_bytes` (the `--max-body-bytes` cap, default 1 MB), so a very large body may be truncated.
+- **Emit through the reporter.** Use `self.report(response, context, message)` for findings and `context.write(message)` for summaries. Prefix terminal messages with `[MODULENAME]` by convention.
+- **Responses stream in completion order, one at a time.** `analyze_one` never sees the whole list. To compare across responses (baseline, counts, diffs) accumulate on `context.state` during `analyze_one`, then act in `finalize`.
+- **Set `needs_body = False`** if you only inspect status/headers: modules receive `response.body == b""`. Traffic logging still reads and stores bodies up to `config.max_body_bytes` (default 1 MB); `--no-log` skips those reads. The same cap applies when the module needs the body. SQLite stores only the eight Burp `ACTIVITY` columns; findings and summaries go through the console reporter.
 - **Set `use_burp = True`** to route this module's traffic through burpsuite. Default `False` sends it direct (or through `--proxy`). Reserve burp for low-volume modules whose traffic you want to inspect manually — high-volume fuzzers left on burp bloat the `.burp` file. Regardless of this setting, every request/response is recorded in the sqlite traffic log, and `--no-proxy` overrides `use_burp` to force direct.
+
+---
+
+## Tool category
+
+Declare the Burp-equivalent activity type on the module:
+
+```python
+from core.tooltags import BurpTool
+
+class MyCheck(BaseModule):
+    tool = BurpTool.SCANNER
+    # ... mutate/analyze_one ...
+```
+
+`BaseModule` defaults to `BurpTool.REPEATER` for backwards-compatible custom
+modules. Choose `INTRUDER` for systematic path/parameter/identity iteration and
+`SCANNER` for automated security checks. Classification does not count requests,
+consume the seed stream or select a proxy. `use_burp` remains independent.
+
+The loader sets `module.module_name` to the file name so CLI
+`--module-tool NAME=TAG` overrides use the public module name, even when its class
+has a different name. Both the loader and runner validate categories before
+traffic is sent. The runner resolves named configuration overrides, then global
+configuration overrides, then the module's default, without changing the class
+attribute. The CLI applies command-line precedence before invoking the runner.
+
+For direct transport callers, `send(..., tool=BurpTool.INTRUDER)` explicitly
+chooses the category; otherwise `config.tool` or `Repeater` is used. Every
+redirect hop and failed request attempt uses that same category. It is persisted
+only in `ACTIVITY.BURP_TOOL`, with no HTTP header or SQLite schema changes.
+
+With `config.human_mode=True`, resolved Repeater traffic is sequential and paced;
+Intruder/Scanner retain normal concurrency. `run_modules()` creates one
+`HumanPacer` per run and shares it across module batches. No per-module sleep
+logic is needed. Analysis/finalisation and intervening scans count towards the
+next interval. `config.random_timing` overrides human mode and retains legacy
+all-category pacing.
+
+Direct callers making several sequential `send()` calls can share a
+`core.timing.HumanPacer` via `send(..., pacer=pacer)`. Without one, each direct
+call starts fresh. Do not share a pacer across concurrent streams or unrelated
+runs. Config fields are `human_mode`, `human_timing_min` and `human_timing_max`;
+`Config.validate_timing()` is called before consuming inputs. Cancellation during
+a human wait propagates normally without sending the next request.
 
 ---
 
@@ -141,29 +209,14 @@ from core.filters import (
 )
 ```
 
-The easiest way to add the **standard filter flags** (`--method` (repeatable),
-`--path`, `--sample`, `--sample-seed`) is the `BaseModule.parse_request_filters()`
-helper — one line in `setup()`:
+The CLI parses the **standard filter flags** (`--method`, `--path`, `--sample`,
+`--sample-seed`) centrally and applies them before a module's custom filters.
+Every module supports these without setup boilerplate, including modules that
+override `request_filters()`. For direct Python callers outside the CLI,
+`parse_request_filters(args)` remains a compatibility helper.
 
-```python
-from modules.base import BaseModule
-
-class MyModule(BaseModule):
-    def setup(self, args):
-        # ... parse your own flags ...
-        self.parse_request_filters(args)   # enables --method/--path/--sample/...
-
-    async def mutate(self, requests, context):
-        return requests
-```
-
-Now `leviosa reqs.json --module mymodule --method POST --sample 5` sends a random
-5 of the POST requests. `filters_from_args` orders selective filters (method,
-path) before sampling, so `--sample` draws from the already-narrowed set.
-
-**All shipped modules already do this** — the standard filter flags work with
-`pathfuzz`, `adminfinder`, `sensitivefiles`, `versiondisclosure`, `errorpages`
-and `passthrough`.
+`leviosa reqs.json --module mymodule --method POST --sample 5` selects a random
+5 POST requests. Selective filters run before sampling.
 
 For custom behaviour, build filters yourself and return them from
 `request_filters()` (the low-level `add_filter_args` / `filters_from_args`
@@ -188,9 +241,8 @@ Notes:
   hand inside `mutate()` — e.g. `return TakeFilter(100).apply(self._variants(...))`.
 - **`SampleFilter` is eager** (reservoir sampling drains its input) — fine for the
   small seed set, but don't stack it on a huge expanded stream.
-- The standard flags are parsed from the shared arg tail, so if two active
-  modules both call `add_filter_args` they filter identically. A module needing
-  independent control should define its own flag names and build filters directly.
+- Standard flags apply to every selected module. For independent control,
+  define module-specific flag names and return custom filters.
 
 See `modules/passthrough.py` for the reference wiring.
 
@@ -198,7 +250,13 @@ See `modules/passthrough.py` for the reference wiring.
 
 ## Module-specific CLI flags
 
-The main leviosa parser uses `parse_known_args`. Any flags it does not recognise are collected into a `remaining` list and passed as-is to every loaded module's `setup(remaining)`.
+The main parser collects module arguments, validates them against the selected
+modules' declared parsers, and rejects unused arguments before setup or traffic.
+Duplicate option names between modules or shared CLI options are rejected;
+modules with conflicting flags must run separately. Declare every option in
+`option_parser()`, use `allow_abbrev=False`, and choose descriptive names.
+After validation, setup receives the module argument tail; use `parse_known_args`
+so arguments declared by other selected modules pass through.
 
 Build the parser in `option_parser()` (with `add_help=False`) and let `setup()`
 parse with it. Keeping the parser in `option_parser()` means `--list-modules` can
@@ -206,7 +264,7 @@ introspect and display your options without running `setup()`:
 
 ```python
 def option_parser(self):
-    parser = argparse.ArgumentParser(prog="mymodule", add_help=False)
+    parser = argparse.ArgumentParser(prog="mymodule", add_help=False, allow_abbrev=False)
     parser.add_argument("--my-flag", required=True, help="What it does")
     parser.add_argument("--optional", default="default_value", help="...")
     return parser
@@ -215,7 +273,6 @@ def setup(self, args: list[str]) -> None:
     parsed, _ = self.option_parser().parse_known_args(args)  # _ discards unknown flags
     self._my_flag = parsed.my_flag
     self._optional = parsed.optional
-    self.parse_request_filters(args)   # optional: enable the standard filters
 ```
 
 `parse_known_args` (not `parse_args`) lets flags belonging to other modules pass
@@ -233,6 +290,47 @@ If a required flag is missing, raise `RuntimeError` with a helpful message (the 
 
 ---
 
+## Scan files and module lifecycle
+
+`--scan FILE` prepares every step before sending any traffic. It creates a new
+module instance for each occurrence, validates its declared options, and calls
+`setup()` once. Keep setup to option/resource validation and loading; do network
+work through the runner. An invalid setup aborts preflight for the entire scan.
+Runtime errors in `mutate()`, iteration, `analyze_one()` or `finalize()` are
+recorded and later steps continue. Cancellation/KeyboardInterrupt propagate;
+output-device failures stop execution.
+
+Each step gets original seed copies and fresh private `context.state`.
+`context.data` remains available for intentional sharing. Emit findings through
+`self.report()` and summaries through `context.write()` so both console and
+optional JSONL output receive them. Evidence should use JSON-compatible values;
+bytes are supported through a base64 wrapper. Invalid evidence encoding fails
+that step and is recorded before continuing.
+
+Declare file-valued option spellings so their values resolve relative to the
+scan file, rather than relying on changing the process's working directory:
+
+```python
+class MyProbe(BaseModule):
+    path_options = {"--wordlist": "file", "--session": "session"}
+    # option_parser() declares these options as usual.
+```
+
+`"file"` resolves a complete value; `"session"` preserves the optional label in
+`LABEL=FILE`. Declare any aliases used in scan args as well. These are input
+files: preflight verifies they exist and prevents outputs from aliasing them.
+Do not mark regexes, URLs or literal payload strings as paths. All shipped
+modules with file-valued options provide this metadata.
+
+`core.scans.read_scan`, `scan_config` and `prepare_scan` implement preparation;
+`run_scan` executes a prepared plan. `core.scanoutput.ScanReporter` sends output
+to the terminal and an optional `JsonlResults` sink. The CLI owns and closes
+these outputs; programmatic callers supply their own logger/results lifetimes.
+`run_scan` shares one `HumanPacer` across all steps via `run_modules(...,
+pacer=pacer)`. It never stores findings, step status or run metadata in SQLite.
+
+---
+
 ## Response analysers
 
 Importable from `core.analysers`. Each analyser has a single method:
@@ -241,7 +339,7 @@ Importable from `core.analysers`. Each analyser has a single method:
 analyser.matches(response: LeviosaResponse) -> str | None
 ```
 
-Returns a human-readable description string on match, `None` on no match. The string is ready to embed directly in `print()` output.
+Returns a human-readable description string on match, `None` on no match. The string is ready to embed in a reported observation.
 
 ### Available analysers
 
@@ -285,7 +383,7 @@ Header name lookup is case-insensitive. Text and value comparisons respect `case
 async def analyze_one(self, response, context):
     for analyser in self._analysers:
         if hit := analyser.matches(response):
-            print(f"[MYMODULE] {hit} — {response.request.method} {response.request.url}")
+            self.report(response, context, f"[MYMODULE] {hit} — {response.request.method} {response.request.url}")
 ```
 
 Analysers are stateless — safe to instantiate once in `setup()` and reuse across all responses.
@@ -301,7 +399,7 @@ from core.analysers import HeaderAnalyser
 
 
 class HeaderCheck(BaseModule):
-    needs_body = False  # only inspects headers — engine skips reading bodies
+    needs_body = False  # only inspects headers; logging still captures a capped body
 
     def __init__(self):
         self._analysers = [
@@ -316,7 +414,7 @@ class HeaderCheck(BaseModule):
     async def analyze_one(self, response, context):
         for analyser in self._analysers:
             if hit := analyser.matches(response):
-                print(f"[HEADERCHECK] {hit} — {response.request.url}")
+                self.report(response, context, f"[HEADERCHECK] {hit} — {response.request.url}")
 ```
 
 ---
@@ -327,6 +425,7 @@ class HeaderCheck(BaseModule):
 # modules/paramfuzz.py
 import argparse
 import copy
+from dataclasses import replace
 
 from modules.base import BaseModule
 from core.analysers import StatusCodeAnalyser, TextMatchAnalyser
@@ -339,7 +438,7 @@ class ParamFuzzer(BaseModule):
         self._analysers = []
 
     def option_parser(self):
-        parser = argparse.ArgumentParser(prog="paramfuzz", add_help=False)
+        parser = argparse.ArgumentParser(prog="paramfuzz", add_help=False, allow_abbrev=False)
         parser.add_argument("--wordlist", required=True, help="Wordlist file")
         parser.add_argument("--param", required=True, help="Param name to fuzz")
         parser.add_argument("--match-text", default=None, help="Flag responses containing this text")
@@ -355,7 +454,6 @@ class ParamFuzzer(BaseModule):
         self._analysers = [StatusCodeAnalyser([200, 500])]
         if parsed.match_text:
             self._analysers.append(TextMatchAnalyser(parsed.match_text, case_sensitive=False))
-        self.parse_request_filters(args)
 
     async def mutate(self, requests, context):
         if self._wordlist is None:
@@ -370,7 +468,7 @@ class ParamFuzzer(BaseModule):
                 # This module mutates param.value in place, so it MUST deepcopy:
                 # dataclasses.replace() only shallow-copies and would alias the
                 # params/Param objects across variants, corrupting siblings.
-                new_req = copy.deepcopy(req)
+                new_req = replace(copy.deepcopy(req))
                 for param in new_req.params:
                     if param.name == self._param_name:
                         param.value = word
@@ -380,14 +478,14 @@ class ParamFuzzer(BaseModule):
         hits = [a.matches(response) for a in self._analysers if a.matches(response)]
         if hits:
             desc = ", ".join(hits)
-            print(f"[PARAMFUZZ] {desc} — {response.request.method} {response.request.url}")
+            self.report(response, context, f"[PARAMFUZZ] {desc} — {response.request.method} {response.request.url}")
 ```
 
 > **Copying variants — `replace` vs `deepcopy`.** For a **url-only** mutation
 > (path fuzzers that only rewrite `req.url`), `dataclasses.replace(req, url=...)`
 > is the right tool: it makes a fresh request while safely sharing the unmutated
 > `headers`/`params` (the engine only reads them). But when you mutate a `Param`
-> value or a header — as `paramfuzz` does — you **must** `copy.deepcopy(req)`
+> value or a header — as `paramfuzz` does — you **must** `replace(copy.deepcopy(req))`
 > (or deep-copy just the touched `Param`), because `replace` aliases the params
 > list and mutating one variant's param would silently change every sibling.
 
@@ -400,10 +498,10 @@ class ParamFuzzer(BaseModule):
 - [ ] `mutate` is implemented (even if it just returns `requests`) and returns a **sync iterable** — a list or a lazy generator, never an async generator
 - [ ] CLI options built in `option_parser()` (so `--list-modules` can show them), parsed in `setup` with `parse_known_args` (not `parse_args`); every argument has a `help=` string
 - [ ] Missing required flags raise `RuntimeError` with a usage hint
-- [ ] Copying variants: `dataclasses.replace(req, url=...)` for **url-only** mutation; `copy.deepcopy(req)` when mutating `params`/headers
-- [ ] Cross-response logic accumulates on `context.data` in `analyze_one` and emits in `finalize` (responses stream one at a time, in completion order)
+- [ ] Copying variants: `dataclasses.replace(req, url=...)` for **url-only** mutation; `replace(copy.deepcopy(req))` when mutating `params`/headers
+- [ ] Cross-response logic accumulates on `context.state` in `analyze_one` and emits in `finalize` (responses stream one at a time, in completion order)
 - [ ] `needs_body = False` set if only status/headers are inspected
 - [ ] `use_burp = True` set only if this module's (typically low-volume) traffic should be routed through burpsuite
-- [ ] Standard request filters enabled with `self.parse_request_filters(args)` in `setup()` (or custom filters returned from `request_filters()`)
-- [ ] Findings printed to stdout; prefix with `[MODULENAME]`
+- [ ] Shared filters are automatic; any custom filters are returned from `request_filters()`
+- [ ] Findings emitted through `self.report()`; summaries through `context.write()`
 - [ ] `status == 0` means a network error — handle or filter as appropriate

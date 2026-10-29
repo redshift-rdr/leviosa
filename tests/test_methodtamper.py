@@ -76,12 +76,13 @@ class TestMutate:
         req = make_request(method="POST")
         m = configured()
         variants = list(await m.mutate([req], LeviosaContext()))
-        assert variants[0] is req
+        assert variants[0] == req
+        assert variants[0].seed_id == req.seed_id
 
     async def test_records_baseline_method(self):
         m = configured()
-        list(await m.mutate([make_request(url="http://x/", method="POST")], LeviosaContext()))
-        assert m._original_method["http://x/"] == "POST"
+        variants = list(await m.mutate([make_request(url="http://x/", method="POST")], LeviosaContext()))
+        assert variants[0].metadata["methodtamper.original_method"] == "POST"
 
     async def test_method_variants_present(self):
         m = configured()
@@ -231,12 +232,16 @@ class TestOutput:
     async def test_differences_report_flags_deviations(self, capsys):
         # Seed baseline GET=404; DELETE returns 200 → a difference.
         m = configured()
-        m._original_method["http://x/"] = "GET"
         responses = [
             make_response(method="GET", status=404, url="http://x/"),
             make_response(method="DELETE", status=200, url="http://x/"),
             make_response(method="HEAD", status=404, url="http://x/"),  # same as baseline
         ]
+        seed_id = responses[0].request.seed_id
+        for i, response in enumerate(responses):
+            response.request.seed_id = seed_id
+            response.request.metadata.update({"methodtamper.original_method": "GET",
+                                              "methodtamper.baseline": i == 0})
         await run(m, responses)
         out = capsys.readouterr().out
         assert "response-code differences vs baseline" in out
@@ -246,15 +251,19 @@ class TestOutput:
 
     async def test_no_differences_no_report(self, capsys):
         m = configured()
-        m._original_method["http://x/"] = "GET"
         responses = [
             make_response(method="GET", status=200, url="http://x/"),
             make_response(method="HEAD", status=200, url="http://x/"),
         ]
+        seed_id = responses[0].request.seed_id
+        for i, response in enumerate(responses):
+            response.request.seed_id = seed_id
+            response.request.metadata.update({"methodtamper.original_method": "GET",
+                                              "methodtamper.baseline": i == 0})
         await run(m, responses)
         assert "differences" not in capsys.readouterr().out
 
     async def test_uses_namespaced_context_keys(self):
         ctx = await run(configured(), [make_response(method="TRACE", status=200)])
-        assert "methodtamper.findings" in ctx.data
-        assert "methodtamper.matrix" in ctx.data
+        assert "methodtamper.findings" in ctx.state
+        assert "methodtamper.matrix" in ctx.state

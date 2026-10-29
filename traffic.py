@@ -13,9 +13,10 @@ import argparse
 import sqlite3
 import sys
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlparse
 
-from core.config import Config
+from core.config import load_config
 
 # Column display defaults.
 _DEFAULT_PATH_WIDTH = 60
@@ -29,8 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "db",
         nargs="?",
-        default=Config().log_db_path,
-        help=f"Path to the traffic sqlite db (default: {Config().log_db_path})",
+        default=load_config().log_db_path,
+        help="Path to an ACTIVITY or legacy traffic database (default: configured log path)",
     )
     parser.add_argument(
         "--after", metavar="TIME",
@@ -55,9 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--module", action="append", default=[], metavar="NAME",
-        help="Only traffic logged by this module (repeatable). "
+        help="Legacy databases only: traffic logged by this module (repeatable). "
              "Use --module '' for raw-dispatch traffic",
     )
+    parser.add_argument("--tool", action="append", default=[], metavar="NAME",
+                        help="ACTIVITY databases only: filter BURP_TOOL (repeatable)")
     parser.add_argument(
         "--path", metavar="TEXT",
         help="Only requests whose URL contains this substring",
@@ -118,6 +121,10 @@ def build_where(args) -> tuple[str, list]:
         placeholders = ",".join("?" * len(args.module))
         clauses.append(f"IFNULL(module, '') IN ({placeholders})")
         params.extend(args.module)
+    if args.tool:
+        placeholders = ",".join("?" * len(args.tool))
+        clauses.append(f"tool IN ({placeholders})")
+        params.extend(args.tool)
     if args.path:
         clauses.append("url LIKE ?")
         params.append(f"%{args.path}%")
@@ -167,28 +174,43 @@ def main():
     args = build_parser().parse_args()
 
     try:
-        where, params = build_where(args)
-    except ValueError as e:
-        print(f"error: {e}", file=sys.stderr)
-        sys.exit(2)
-
-    try:
-        # Read-only connection so we never touch the log we are inspecting.
-        conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+        # Read-only and URI-escaped, including paths containing ? or #.
+        conn = sqlite3.connect(Path(args.db).resolve().as_uri() + "?mode=ro", uri=True)
     except sqlite3.OperationalError:
         print(f"error: cannot open traffic db: {args.db!r}", file=sys.stderr)
         sys.exit(1)
 
     try:
+        tables = {row[0].upper() for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+        activity = "ACTIVITY" in tables
+        if activity:
+            if args.module:
+                raise ValueError("--module is only available for legacy traffic databases; "
+                                 "ACTIVITY stores BURP_TOOL, filter it with --tool")
+            source = """(SELECT rowid AS id, SEND_DATETIME AS ts, HTTP_METHOD AS method,
+                TARGET_URL AS url, CAST(HTTP_STATUS_CODE AS INTEGER) AS status,
+                length(CAST(RESPONSE_RAW AS BLOB)) AS response_bytes,
+                NULL AS module, BURP_TOOL AS tool,
+                CASE WHEN HTTP_STATUS_CODE = '0' THEN 1 ELSE 0 END AS error FROM ACTIVITY)"""
+        elif "TRAFFIC" in tables:
+            if args.tool:
+                raise ValueError("--tool requires an ACTIVITY database; use --module for legacy logs")
+            source = "traffic"
+        else:
+            raise ValueError("database contains neither ACTIVITY nor a legacy traffic table")
+        where, params = build_where(args)
         if args.count:
-            (total,) = conn.execute(f"SELECT COUNT(*) FROM traffic{where}", params).fetchone()
+            (total,) = conn.execute(f"SELECT COUNT(*) FROM {source}{where}", params).fetchone()
             print(total)
             return
 
         order = "DESC" if args.desc else "ASC"
+        category = "tool" if activity else "module"
         sql = (
-            "SELECT ts, method, url, status, response_bytes, module, error "
-            f"FROM traffic{where} ORDER BY id {order}"
+            f"SELECT ts, method, url, status, response_bytes, {category}, error "
+            f"FROM {source}{where} ORDER BY id {order}"
         )
         if args.limit and args.limit > 0:
             sql += f" LIMIT {int(args.limit)}"
@@ -204,7 +226,7 @@ def main():
                 module or "-",
                 _path_of(url, args.path_width),
             ])
-    except sqlite3.OperationalError as e:
+    except (sqlite3.Error, ValueError) as e:
         print(f"error: querying db failed: {e}", file=sys.stderr)
         sys.exit(1)
     finally:
@@ -214,7 +236,8 @@ def main():
         print("no matching traffic.")
         return
 
-    headers = ["DATETIME (UTC)", "METHOD", "STATUS", "BYTES", "MODULE", "PATH"]
+    headers = ["DATETIME (LOCAL)" if activity else "DATETIME (UTC)", "METHOD", "STATUS", "BYTES",
+               "TOOL" if activity else "MODULE", "PATH"]
     _print_table(headers, rows, right_align={2, 3})
     print(f"\n{len(rows)} row(s)", end="")
     if args.limit and len(rows) == args.limit:

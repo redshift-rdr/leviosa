@@ -3,9 +3,11 @@ import asyncio
 import inspect
 import json
 import shutil
+import sqlite3
 import sys
 import textwrap
-from contextlib import aclosing
+from contextlib import aclosing, ExitStack
+from pathlib import Path
 
 from core.config import load_config
 from core.cookies import (
@@ -13,13 +15,17 @@ from core.cookies import (
     overrides_from_header_string,
     with_cookie_overrides,
 )
-from core.filters import add_filter_args
+from core.filters import add_filter_args, filters_from_args
+from core.options import setup_modules, ValidationParser
 from core.loader import discover_modules, load_modules
 from core.logdb import TrafficLogger
 from core.models import LeviosaContext
 from core.parsers import request_source
 from core.requester import resolve_proxy, send
 from core.runner import run_modules
+from core.tooltags import BurpTool, parse_module_tools, resolve_module_tool
+from core.scans import read_scan, scan_config, prepare_scan, run_scan
+from core.scanoutput import JsonlResults, ScanReporter
 
 
 def _option_rows(parser: argparse.ArgumentParser) -> list[tuple[str, str]]:
@@ -50,12 +56,12 @@ def _print_option_rows(rows: list[tuple[str, str]], indent: int) -> None:
             print(f"{' ' * help_col}{cont}")
 
 
-def list_modules() -> None:
+def list_modules(modules_dir=None) -> None:
     """Print every available module, its description and its CLI options."""
     print("Available modules:\n")
-    for name in discover_modules():
+    for name in discover_modules(modules_dir):
         try:
-            module = load_modules([name])[0]
+            module = load_modules([name], modules_dir)[0]
         except Exception as e:  # a broken module shouldn't sink the whole listing
             print(f"  {name}")
             print(f"      (failed to load: {e})\n")
@@ -64,6 +70,7 @@ def list_modules() -> None:
         doc = inspect.getdoc(type(module)) or ""
         summary = doc.split("\n\n", 1)[0].replace("\n", " ").strip() or "(no description)"
         print(f"  {name}")
+        print(f"      tool: {module.tool}")
         for line in textwrap.wrap(summary, 72):
             print(f"      {line}")
 
@@ -89,18 +96,32 @@ class _ListModulesAction(argparse.Action):
         super().__init__(option_strings, dest, nargs=0, default=argparse.SUPPRESS, **kwargs)
 
     def __call__(self, parser, namespace, values, option_string=None):
-        list_modules()
+        directory_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+        directory_parser.add_argument("--modules-dir")
+        directory_args, _ = directory_parser.parse_known_args()
+        list_modules(directory_args.modules_dir)
         parser.exit()
 
 
+class _MainParser(argparse.ArgumentParser):
+    def parse_known_args(self, args=None, namespace=None):
+        parsed, remaining = super().parse_known_args(args, namespace)
+        if parsed.target is None and parsed.scan is None:
+            self.error("a target or --scan FILE is required")
+        if not parsed.scan and (parsed.validate_scan or parsed.results is not None):
+            self.error("--validate-scan and --results require --scan")
+        return parsed, remaining
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _MainParser(
         prog="leviosa",
         description="A lightweight web penetration testing helper.",
+        allow_abbrev=False,
     )
     parser.add_argument(
-        "target",
-        help="URL, URL-list file (.txt), or JSON request file (.json)",
+        "target", nargs="?",
+        help="URL, URL-list or JSON request file; overrides target in --scan",
     )
     parser.add_argument(
         "--module", "-m",
@@ -136,6 +157,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable the sqlite traffic log",
     )
+    parser.add_argument("--tool", type=BurpTool, choices=list(BurpTool),
+                        help="Override the BURP_TOOL category for this run")
+    parser.add_argument("--module-tool", dest="module_tools", action="append", default=[],
+                        metavar="NAME=TAG", help="Override a selected module's category (repeatable); "
+                        "TAG is Repeater, Intruder or Scanner")
     parser.add_argument(
         "--concurrency",
         type=int,
@@ -167,8 +193,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--random-timing",
-        action="store_true",
-        help="Send requests sequentially with a random human-like delay between each one "
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Pace ALL categories sequentially, overriding human mode "
              "(see --random-timing-min / --random-timing-max for the range)",
     )
     parser.add_argument(
@@ -183,19 +210,28 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SECS",
         help="Maximum inter-request delay in seconds when --random-timing is active (default: 8.0)",
     )
+    parser.add_argument("--human-mode", action=argparse.BooleanOptionalAction, default=None,
+                        help="Pace Repeater traffic; Intruder and Scanner retain normal concurrency")
+    parser.add_argument("--human-timing-min", type=float, metavar="SECS",
+                        help="Minimum Repeater idle interval (default: 2.0); enables human mode unless explicitly disabled")
+    parser.add_argument("--human-timing-max", type=float, metavar="SECS",
+                        help="Maximum Repeater idle interval (default: 8.0); enables human mode unless explicitly disabled")
     parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Log debug info to stderr",
     )
+    parser.add_argument("--modules-dir", metavar="PATH",
+                        help="Load custom modules from this directory instead of built-ins")
+    parser.add_argument("--scan", metavar="FILE", help="Run ordered module steps from a TOML file")
+    parser.add_argument("--validate-scan", action="store_true",
+                        help="Validate and display a scan without sending traffic or creating outputs")
+    parser.add_argument("--results", metavar="FILE", help="Append scan findings and progress to a separate JSONL file")
+    add_filter_args(parser)
     return parser
 
 
-def main():
-    parser = build_parser()
-    args, remaining = parser.parse_known_args()
-
-    config = load_config()
+def _apply_cli(config, args, parser, selected_modules=None):
     if args.proxy is not None:
         config.proxy_url = args.proxy
     if args.no_proxy:
@@ -212,14 +248,39 @@ def main():
         config.follow_redirects = True
     if args.modules:
         config.modules = args.modules
-    if args.random_timing:
-        config.random_timing = True
+    if args.tool is not None:
+        config.tool = args.tool
+        # A CLI-wide override takes precedence over file-configured defaults,
+        # including per-module exceptions; CLI named overrides are applied next.
+        config.module_tools = {}
+    try:
+        module_tools = parse_module_tools(args.module_tools)
+        unselected = module_tools.keys() - set(config.modules if selected_modules is None else selected_modules)
+        if unselected:
+            parser.error("--module-tool refers to unselected module(s): " + ", ".join(sorted(unselected)))
+        config.module_tools.update(module_tools)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.random_timing_min is not None:
         config.random_timing_min = args.random_timing_min
-        config.random_timing = True
     if args.random_timing_max is not None:
         config.random_timing_max = args.random_timing_max
+    if args.random_timing is not None:
+        config.random_timing = args.random_timing
+    elif args.random_timing_min is not None or args.random_timing_max is not None:
         config.random_timing = True
+    if args.human_timing_min is not None:
+        config.human_timing_min = args.human_timing_min
+    if args.human_timing_max is not None:
+        config.human_timing_max = args.human_timing_max
+    if args.human_mode is not None:
+        config.human_mode = args.human_mode
+    elif args.human_timing_min is not None or args.human_timing_max is not None:
+        config.human_mode = True
+    try:
+        config.validate_timing()
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.verbose:
         config.verbose = True
 
@@ -235,9 +296,84 @@ def main():
         print(f"[leviosa] traffic log: {log_info}", file=sys.stderr)
         if config.random_timing:
             print(
-                f"[leviosa] random timing: {config.random_timing_min:.1f}s–{config.random_timing_max:.1f}s (sequential)",
+                f"[leviosa] random timing: {config.random_timing_min:.1f}s–{config.random_timing_max:.1f}s "
+                "(all categories; overrides human mode)",
                 file=sys.stderr,
             )
+        elif config.human_mode:
+            print(f"[leviosa] human mode: {config.human_timing_min:.1f}s–{config.human_timing_max:.1f}s "
+                  "(Repeater only; Intruder/Scanner use normal concurrency)", file=sys.stderr)
+
+    return config
+
+
+def _scan_main(parser, args, remaining):
+    if args.modules:
+        parser.error("--module cannot be combined with --scan; select modules in [[steps]]")
+    if remaining:
+        parser.error("unrecognized scan arguments: " + " ".join(remaining) + "; put module options in step args")
+    try:
+        definition = read_scan(args.scan)
+        config = scan_config(definition, load_config())
+        _apply_cli(config, args, parser, definition.module_names)
+        cookies = {}
+        if args.cookie_from:
+            cookies.update(overrides_from_donor(args.cookie_from))
+        if args.cookies:
+            cookies.update(overrides_from_header_string(args.cookies))
+        target = args.target
+        if target is not None and not target.startswith(("http://", "https://")):
+            target = str(Path(target).expanduser().resolve())
+        validation = ValidationParser(add_help=False, parents=[parser], allow_abbrev=False)
+        protected = [Path("leviosa.toml").resolve()]
+        if args.cookie_from:
+            protected.append(Path(args.cookie_from).resolve())
+        plan = prepare_scan(
+            definition, config, validation, target=target,
+            modules_dir=str(Path(args.modules_dir).expanduser().resolve()) if args.modules_dir else None,
+            results=str(Path(args.results).expanduser().resolve()) if args.results else None,
+            filters=filters_from_args(args), cli_tool=args.tool,
+            cli_module_tools=parse_module_tools(args.module_tools),
+            source_transform=lambda source: with_cookie_overrides(source, cookies), protected_paths=protected,
+        )
+    except Exception as exc:
+        parser.error(f"invalid scan: {exc}")
+    if args.validate_scan:
+        print(f"[SCAN] Valid: {plan.name}; target={plan.target}; {len(plan.steps)} steps")
+        for step in plan.steps:
+            print(f"[SCAN] {step.index}. {step.name}: {step.module.module_name} ({step.config.tool})")
+        print(f"[SCAN] Traffic: {plan.config.log_db_path if plan.config.log_enabled else 'disabled'}; "
+              f"results: {plan.results or 'console only'}")
+        return 0
+    try:
+        with ExitStack() as resources:
+            results = JsonlResults(plan.results) if plan.results else None
+            if results is not None:
+                resources.callback(results.close)
+            logger = TrafficLogger(plan.config.log_db_path) if plan.config.log_enabled else None
+            if logger is not None:
+                resources.callback(logger.close)
+            outcome = asyncio.run(run_scan(plan, output=ScanReporter(results), logger=logger))
+        return 1 if outcome.failed else 0
+    except KeyboardInterrupt:
+        print("[leviosa] scan interrupted.", file=sys.stderr)
+        return 130
+    except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+def main():
+    parser = build_parser()
+    args, remaining = parser.parse_known_args()
+    if args.scan:
+        return _scan_main(parser, args, remaining)
+
+    try:
+        config = load_config()
+    except (ValueError, TypeError) as exc:
+        parser.error(f"invalid configuration: {exc}")
+    _apply_cli(config, args, parser)
 
     try:
         source = request_source(args.target)
@@ -247,6 +383,8 @@ def main():
     except json.JSONDecodeError as e:
         print(f"error: malformed JSON in {args.target!r}: {e.msg}", file=sys.stderr)
         sys.exit(1)
+    except (ValueError, KeyError, TypeError) as e:
+        parser.error(f"invalid request file: {e}")
 
     # Cookie overrides refresh timed-out session cookies. Donor file first, then
     # the pasted header on top so an explicit --cookies value always wins.
@@ -275,36 +413,52 @@ def main():
         if config.modules:
             print(f"[leviosa] modules: {', '.join(config.modules)}", file=sys.stderr)
 
+    try:
+        modules = load_modules(config.modules, args.modules_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        parser.error(str(exc))
+    try:
+        filters = filters_from_args(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+    setup_modules(modules, remaining, filters, parser)
+    try:
+        for module in modules:
+            tool = resolve_module_tool(module, config)
+            if config.verbose:
+                print(f"[leviosa] {module.module_name}: tool={tool}", file=sys.stderr)
+    except (ValueError, TypeError) as exc:
+        parser.error(f"invalid module tool: {exc}")
+    if not modules and filters:
+        unfiltered_source = source
+
+        def source():
+            requests = unfiltered_source()
+            for request_filter in filters:
+                requests = request_filter.apply(requests)
+            return requests
+
     # The traffic log captures every request/response, including traffic that
     # bypasses burp, so the whole engagement is recorded locally.
-    logger = TrafficLogger(config.log_db_path) if config.log_enabled else None
+    try:
+        logger = TrafficLogger(config.log_db_path) if config.log_enabled else None
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        parser.error(str(exc))
     try:
         if config.modules:
-            try:
-                modules = load_modules(config.modules)
-            except FileNotFoundError as e:
-                print(f"error: {e}", file=sys.stderr)
-                sys.exit(1)
-            except ValueError as e:
-                print(f"error: {e}", file=sys.stderr)
-                sys.exit(1)
-
-            for mod in modules:
-                mod.setup(remaining)
-
             context = LeviosaContext()
             try:
                 asyncio.run(run_modules(modules, source, config, context, logger))
             except KeyboardInterrupt:
                 print("\n[leviosa] interrupted.", file=sys.stderr)
                 sys.exit(130)
-            except RuntimeError as e:
+            except (RuntimeError, ValueError, TypeError, sqlite3.Error) as e:
                 print(f"error: {e}", file=sys.stderr)
                 sys.exit(1)
         else:
             # Raw dispatch: stream statuses as they complete. read_body=False since
-            # we only print the status line, so no body is ever downloaded. No
-            # module, so proxy follows --proxy / direct (no burp opt-in).
+            # we only print the status line; the logger still captures capped
+            # bodies. Proxy follows --proxy / direct (no burp opt-in).
             proxy, proxy_auth = resolve_proxy(config, use_burp=False)
 
             async def _raw():
@@ -325,10 +479,13 @@ def main():
             except KeyboardInterrupt:
                 print("\n[leviosa] interrupted.", file=sys.stderr)
                 sys.exit(130)
+            except (ValueError, TypeError, sqlite3.Error) as e:
+                print(f"error: {e}", file=sys.stderr)
+                sys.exit(1)
     finally:
         if logger is not None:
             logger.close()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

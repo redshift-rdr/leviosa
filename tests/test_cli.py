@@ -276,3 +276,68 @@ class TestEntryPoint:
         )
         assert "--module" in result.stdout
         assert "--no-proxy" in result.stdout
+
+
+def test_legacy_log_output_is_rejected_without_traceback_or_changes(tmp_path):
+    import sqlite3
+    path = tmp_path / 'legacy.db'
+    with sqlite3.connect(path) as conn:
+        conn.execute('CREATE TABLE traffic (id INTEGER)')
+    before = path.read_bytes()
+    result = subprocess.run(
+        [sys.executable, 'leviosa.py', 'http://127.0.0.1:1', '--no-proxy', '--log-db', str(path)],
+        capture_output=True, text=True, cwd=PROJECT_ROOT,
+    )
+    assert result.returncode != 0
+    assert 'choose a new --log-db' in result.stderr
+    assert 'Traceback' not in result.stderr
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize('flags', [
+    ['--tool', 'Requester'],
+    ['--tool', 'Proxy'],
+    ['--module-tool', 'sqli=Proxy', '-m', 'sqli'],
+    ['--module-tool', 'sqli=Scanner'],
+    ['--module-tool', 'sqli=Scanner', '--module-tool', 'sqli=Repeater', '-m', 'sqli'],
+    ['--module-tool', 'sqli', '-m', 'sqli'],
+])
+def test_invalid_tag_options_fail_before_output_database_creation(tmp_path, flags):
+    path = tmp_path / 'not-created.sqlite'
+    result = subprocess.run(
+        [sys.executable, str(PROJECT_ROOT / 'leviosa.py'), 'http://127.0.0.1:1',
+         '--no-proxy', '--log-db', str(path), *flags],
+        capture_output=True, text=True, cwd=tmp_path,
+    )
+    assert result.returncode != 0
+    assert 'error:' in result.stderr
+    assert 'Traceback' not in result.stderr
+    assert not path.exists()
+
+
+def test_list_modules_displays_default_tools():
+    result = subprocess.run([sys.executable, 'leviosa.py', '--list-modules'],
+                            capture_output=True, text=True, cwd=PROJECT_ROOT)
+    assert result.returncode == 0
+    for tag in ('Repeater', 'Intruder', 'Scanner'):
+        assert f'tool: {tag}' in result.stdout
+
+
+@pytest.mark.parametrize('flags', [
+    ['--human-mode', '--human-timing-min', '-1'],
+    ['--human-timing-min', 'nan'],
+    ['--human-timing-max', 'inf'],
+    ['--human-timing-min', '9', '--human-timing-max', '2'],
+    ['--random-timing-min', '-1'],
+    ['--random-timing-max', 'nan'],
+])
+def test_invalid_timing_fails_before_output_database_creation(tmp_path, flags):
+    path = tmp_path / 'not-created.sqlite'
+    result = subprocess.run(
+        [sys.executable, str(PROJECT_ROOT / 'leviosa.py'), 'http://127.0.0.1:1',
+         '--no-proxy', '--log-db', str(path), *flags],
+        capture_output=True, text=True, cwd=tmp_path,
+    )
+    assert result.returncode != 0
+    assert 'error:' in result.stderr and 'Traceback' not in result.stderr
+    assert not path.exists()

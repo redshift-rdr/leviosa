@@ -1,110 +1,140 @@
-import json
+import hashlib
+import shutil
 import sqlite3
+from datetime import datetime
+from pathlib import Path
 
 import pytest
 
-from core.logdb import TrafficLogger
-from core.models import LeviosaRequest, LeviosaResponse, Param
+from core.logdb import TrafficLogger, _COLUMNS, _text
+from core.models import LeviosaRequest, LeviosaResponse, TrafficRecord
+
+EXAMPLE = Path(__file__).resolve().parent.parent / 'example_db_log.sqlite'
 
 
-def make_response(url="http://example.com", status=200, body=b"hello", params=None):
-    req = LeviosaRequest(
-        method="GET",
-        url=url,
-        headers=["Host: example.com"],
-        params=params or [],
-    )
-    return LeviosaResponse(
-        status=status,
-        headers={"Content-Type": "text/html"},
-        body=body,
-        request=req,
-    )
+def make_response(status=200, body=b'hello'):
+    req = LeviosaRequest('POST', 'http://example.com/api?q=one&q=two', [], [])
+    record = TrafficRecord(req.url, req.method, datetime(2026, 10, 29, 11, 35, 30),
+                           '192.0.2.2', b'POST /api?q=one&q=two HTTP/1.1\r\nHost: example.com\r\nContent-Length: 3\r\n\r\na=1',
+                           status, body)
+    return LeviosaResponse(status, {}, body, req, traffic=[record])
 
 
-@pytest.fixture
-def db_path(tmp_path):
-    return str(tmp_path / "traffic.db")
+def rows(path):
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(row) for row in conn.execute('SELECT * FROM ACTIVITY ORDER BY rowid')]
 
 
-def read_rows(path):
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    try:
-        return [dict(r) for r in conn.execute("SELECT * FROM traffic ORDER BY id")]
-    finally:
-        conn.close()
+def schema(path):
+    with sqlite3.connect(path) as conn:
+        return conn.execute("SELECT name, sql FROM sqlite_master WHERE type='table'").fetchall(), conn.execute('PRAGMA table_info(ACTIVITY)').fetchall()
 
 
-class TestTrafficLogger:
-    def test_creates_table(self, db_path):
-        logger = TrafficLogger(db_path)
-        logger.close()
-        conn = sqlite3.connect(db_path)
-        try:
-            tables = {
-                r[0]
-                for r in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                )
-            }
-        finally:
-            conn.close()
-        assert "traffic" in tables
+def test_schema_exactly_matches_burp_example(tmp_path):
+    path = tmp_path / 'output.sqlite'
+    logger = TrafficLogger(str(path))
+    logger.close()
+    tables, columns = schema(path)
+    assert [name for name, _ in tables] == ['ACTIVITY']
+    assert columns == schema(EXAMPLE)[1]
+    assert [row[1] for row in columns] == list(_COLUMNS)
 
-    def test_logs_a_row(self, db_path):
-        logger = TrafficLogger(db_path)
-        logger.log(make_response(), module="AdminFinder", proxy="http://127.0.0.1:8080")
-        logger.close()
 
-        rows = read_rows(db_path)
-        assert len(rows) == 1
-        row = rows[0]
-        assert row["module"] == "AdminFinder"
-        assert row["proxy"] == "http://127.0.0.1:8080"
-        assert row["method"] == "GET"
-        assert row["url"] == "http://example.com"
-        assert row["status"] == 200
-        assert row["response_body"] == b"hello"
-        assert row["response_bytes"] == 5
-        assert row["error"] == 0
-        assert row["ts"]
+def test_log_stores_only_compatible_text_values(tmp_path):
+    path = tmp_path / 'output.sqlite'
+    logger = TrafficLogger(str(path))
+    logger.log(make_response())
+    logger.close()
+    record, = rows(path)
+    assert record == {
+        'LOCAL_SOURCE_IP': '192.0.2.2', 'TARGET_URL': 'http://example.com/api?q=one&q=two',
+        'HTTP_METHOD': 'POST', 'BURP_TOOL': 'Repeater',
+        'REQUEST_RAW': 'POST /api?q=one&q=two HTTP/1.1\r\nHost: example.com\r\nContent-Length: 3\r\n\r\na=1',
+        'SEND_DATETIME': '2026-10-29 11:35:30', 'HTTP_STATUS_CODE': '200', 'RESPONSE_RAW': 'hello',
+    }
+    assert all(isinstance(value, str) for value in record.values())
 
-    def test_headers_and_params_stored_as_json(self, db_path):
-        logger = TrafficLogger(db_path)
-        params = [Param(type="cookie", name="session", value="abc")]
-        logger.log(make_response(params=params))
-        logger.close()
 
-        row = read_rows(db_path)[0]
-        assert json.loads(row["request_headers"]) == ["Host: example.com"]
-        assert json.loads(row["request_params"]) == [
-            {"type": "cookie", "name": "session", "value": "abc"}
-        ]
-        assert json.loads(row["response_headers"]) == {"Content-Type": "text/html"}
+def test_append_to_burp_copy_preserves_schema_and_existing_rows(tmp_path):
+    original_digest = hashlib.sha256(EXAMPLE.read_bytes()).hexdigest()
+    path = tmp_path / 'burp.sqlite'
+    shutil.copy2(EXAMPLE, path)
+    before = rows(path)
+    before_schema = schema(path)
+    logger = TrafficLogger(str(path))
+    logger.log(make_response(), tool='Scanner')
+    logger.close()
+    assert rows(path)[:-1] == before
+    assert rows(path)[-1]['BURP_TOOL'] == 'Scanner'
+    assert schema(path) == before_schema
+    assert hashlib.sha256(EXAMPLE.read_bytes()).hexdigest() == original_digest
 
-    def test_network_error_flagged(self, db_path):
-        logger = TrafficLogger(db_path)
-        # status == 0 is the network-error sentinel from _send_one.
-        logger.log(make_response(status=0, body=b""))
-        logger.close()
 
-        row = read_rows(db_path)[0]
-        assert row["error"] == 1
-        assert row["response_body"] is None
-        assert row["response_bytes"] == 0
+def test_network_failure_is_status_zero_with_empty_response(tmp_path):
+    path = tmp_path / 'output.sqlite'
+    response = make_response(0, b'')
+    response.traffic[0].request_raw = b''
+    response.traffic[0].local_source_ip = ''
+    logger = TrafficLogger(str(path))
+    logger.log(response)
+    logger.close()
+    record, = rows(path)
+    assert record['HTTP_STATUS_CODE'] == '0'
+    assert record['RESPONSE_RAW'] == record['REQUEST_RAW'] == record['LOCAL_SOURCE_IP'] == ''
 
-    def test_batch_commit_then_close_persists_all(self, db_path):
-        logger = TrafficLogger(db_path)
-        for i in range(120):
-            logger.log(make_response(url=f"http://example.com/{i}"))
-        logger.close()
-        assert len(read_rows(db_path)) == 120
 
-    def test_none_module_and_proxy(self, db_path):
-        logger = TrafficLogger(db_path)
+def test_each_write_visible_without_close(tmp_path):
+    path = tmp_path / 'output.sqlite'
+    logger = TrafficLogger(str(path))
+    for _ in range(60):
         logger.log(make_response())
+    assert len(rows(path)) == 60
+    # A second writer is not blocked by the first logger's idle connection.
+    other = TrafficLogger(str(path))
+    other.log(make_response())
+    other.close()
+    logger.close()
+    assert len(rows(path)) == 61
+
+
+@pytest.mark.parametrize('ddl', [
+    'CREATE TABLE traffic (id INTEGER)',
+    'CREATE TABLE ACTIVITY (TARGET_URL TEXT)',
+])
+def test_reject_incompatible_database_without_schema_changes(tmp_path, ddl):
+    path = tmp_path / 'old.sqlite'
+    with sqlite3.connect(path) as conn:
+        conn.execute(ddl)
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match='choose a new'):
+        TrafficLogger(str(path))
+    assert path.read_bytes() == before
+
+
+def test_logger_requires_real_transport_capture(tmp_path):
+    logger = TrafficLogger(str(tmp_path / 'output.sqlite'))
+    response = make_response()
+    response.traffic = []
+    try:
+        with pytest.raises(ValueError, match='transport-captured'):
+            logger.log(response)
+    finally:
         logger.close()
-        row = read_rows(db_path)[0]
-        assert row["module"] is None
-        assert row["proxy"] is None
+
+
+def test_text_and_binary_decode_without_replacement_characters():
+    assert _text('caf\u00e9'.encode()) == 'caf\u00e9'
+    assert _text(b'caf\xe9', 'iso-8859-1') == 'caf\u00e9'
+    assert _text(b'\x00\xff').encode('latin-1') == b'\x00\xff'
+
+
+def test_invalid_output_tag_is_rejected_before_insert(tmp_path):
+    path = tmp_path / 'output.sqlite'
+    logger = TrafficLogger(str(path))
+    try:
+        with pytest.raises(ValueError):
+            logger.log(make_response(), tool='Requester')
+        assert not rows(path)
+    finally:
+        logger.close()

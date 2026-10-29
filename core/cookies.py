@@ -17,6 +17,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import replace
 
 from core.models import LeviosaRequest
+from core.headers import parse_headers, split_header
 from core.parsers import parse_request_file
 
 
@@ -40,10 +41,8 @@ def overrides_from_header_string(raw: str) -> dict[str, str]:
 def cookies_from_request(req: LeviosaRequest) -> dict[str, str]:
     """Extract every cookie from one request (raw Cookie header + cookie params)."""
     cookies: dict[str, str] = {}
-    for header in req.headers:
-        name, sep, value = header.partition(": ")
-        if sep and name.lower() == "cookie":
-            cookies.update(parse_cookie_header(value))
+    for value in parse_headers(req.headers).getall("cookie", []):
+        cookies.update(parse_cookie_header(value))
     # Structured params take precedence over the raw header.
     for param in req.params:
         if param.type == "cookie":
@@ -67,9 +66,10 @@ def overrides_from_donor(path: str) -> dict[str, str]:
 
 def _rewrite_cookie_header(header: str, overrides: dict[str, str]) -> str:
     """Return the header with matching cookie values replaced; non-Cookie headers pass through."""
-    name, sep, value = header.partition(": ")
-    if not sep or name.lower() != "cookie":
+    pair = split_header(header)
+    if pair is None or pair[0].lower() != "cookie":
         return header
+    name, value = pair
     rebuilt = "; ".join(
         f"{k}={overrides.get(k, v)}" for k, v in parse_cookie_header(value)
     )

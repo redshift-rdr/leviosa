@@ -4,12 +4,32 @@ from collections.abc import Iterable
 
 from core.filters import RequestFilter, add_filter_args, filters_from_args
 from core.models import LeviosaContext, LeviosaRequest, LeviosaResponse
+from core.reporting import Finding
+from core.tooltags import BurpTool
 
 
 class BaseModule(ABC):
-    # Whether analyze_one needs the response body. When False the engine skips
-    # reading the body entirely (body is b""), keeping status-only modules cheap
-    # and avoiding downloading large artefacts.
+    # The loader supplies the file's public module name for named overrides.
+    module_name: str | None = None
+    tool: BurpTool = BurpTool.REPEATER
+    # File-valued options resolved relative to a scan file. "session" accepts LABEL=FILE.
+    path_options: dict[str, str] = {}
+
+    # Populated by the CLI, independently of a module's custom filters.
+    cli_filters: tuple[RequestFilter, ...] = ()
+
+    def report(self, response, context, observation, *, evidence=None, confidence="observation"):
+        """Emit a structured observation through the configured reporter."""
+        context.reporter.report(Finding(
+            module=type(self).__name__, request=response.request,
+            observation=observation,
+            evidence={"status": response.status, **(evidence or {})},
+            confidence=confidence,
+        ))
+
+    # Whether analyze_one needs the response body. False passes b"" to the
+    # module. The transport still reads capped bodies if traffic logging is on;
+    # with logging off it skips reads entirely.
     needs_body: bool = True
 
     # Whether this module's traffic should be routed through the burp proxy.
@@ -23,12 +43,12 @@ class BaseModule(ABC):
 
     def option_parser(self) -> "argparse.ArgumentParser | None":
         """
-        Return an argparse parser (built with add_help=False) describing this
+        Return an argparse parser (built with add_help=False, allow_abbrev=False) describing this
         module's own CLI options, or None if it has none. setup() parses flags
         with it and --list-modules introspects it to show the options.
 
-        Do NOT register the standard request-filter flags here — those are added
-        separately by parse_request_filters() and listed once globally.
+        Do NOT register the standard request-filter flags here — the CLI owns
+        them and applies them centrally after setup(). Use allow_abbrev=False.
         """
         return None
 
@@ -37,11 +57,10 @@ class BaseModule(ABC):
         Parse the standard request-filter flags (--method / --path / --sample /
         --sample-seed) from the CLI args and store them for request_filters().
 
-        Call this from setup() (one line) to give a module input sampling and
-        restriction. The flags are orthogonal to a module's own argparse parser,
-        so both can read the same args list independently.
+        Compatibility helper for callers using setup() outside the CLI. The CLI
+        applies these centrally, so new modules need not call this helper.
         """
-        parser = argparse.ArgumentParser(add_help=False)
+        parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
         add_filter_args(parser)
         parsed, _ = parser.parse_known_args(args)
         self._filters = filters_from_args(parsed)
@@ -78,8 +97,9 @@ class BaseModule(ABC):
     ) -> None:
         """
         Called once per response, as each one completes (completion order, not
-        input order). Print findings to stdout. Aggregate across responses by
-        stashing state on context.data and acting in finalize(). Default no-op.
+        input order). Emit findings with self.report(response, context, message).
+        Aggregate privately on context.state; context.data is explicitly shared
+        between modules. Default no-op.
         """
 
     async def finalize(self, context: LeviosaContext) -> None:

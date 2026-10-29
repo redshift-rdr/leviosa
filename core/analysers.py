@@ -105,10 +105,7 @@ class HeaderAnalyser(ResponseAnalyser):
         self._pattern = _re.compile(pattern) if pattern else None
 
     def matches(self, response: LeviosaResponse) -> str | None:
-        header_val = next(
-            (v for k, v in response.headers.items() if k.lower() == self._name.lower()),
-            None,
-        )
+        header_val = response.headers.get(self._name)
         if header_val is None:
             return None
 

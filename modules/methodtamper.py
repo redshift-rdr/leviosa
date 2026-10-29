@@ -1,7 +1,9 @@
 import argparse
 from dataclasses import replace
 
+from core.tooltags import BurpTool
 from modules.base import BaseModule
+from core.headers import parse_headers, without_headers
 
 # Namespaced context keys: the interesting-findings tally and the per-URL
 # method/status matrix used for the finalize() "differences" report.
@@ -75,6 +77,8 @@ class MethodTamper(BaseModule):
     Only status codes and the Allow header are needed, so needs_body is False.
     """
 
+    tool = BurpTool.SCANNER
+
     # Status/header-only module: the engine skips reading response bodies.
     needs_body = False
 
@@ -83,12 +87,10 @@ class MethodTamper(BaseModule):
         self._override_headers = list(_DEFAULT_OVERRIDE_HEADERS)
         self._override_methods = list(_DEFAULT_OVERRIDE_METHODS)
         self._use_override = True
-        # url -> original (baseline) method, recorded during mutate().
-        self._original_method: dict[str, str] = {}
         self._filters = []
 
     def option_parser(self):
-        parser = argparse.ArgumentParser(prog="methodtamper", add_help=False)
+        parser = argparse.ArgumentParser(prog="methodtamper", add_help=False, allow_abbrev=False)
         parser.add_argument(
             "--methods", metavar="CSV", default=None,
             help="Comma-separated methods to try instead of the default set "
@@ -134,8 +136,11 @@ class MethodTamper(BaseModule):
     def _variants(self, requests):
         for req in requests:
             # Baseline: the untouched request, and the reference for finalize().
-            self._original_method[req.url] = req.method.upper()
-            yield req
+            original = replace(req, metadata={**req.metadata,
+                "methodtamper.original_method": req.method.upper(),
+                "methodtamper.baseline": True})
+            yield original
+            req = replace(original, metadata={**original.metadata, "methodtamper.baseline": False})
 
             for method in self._methods:
                 # Method-only change: replace() safely shares the read-only
@@ -153,10 +158,7 @@ class MethodTamper(BaseModule):
         # replace() never aliases the seed request's list across variants.
         # The transport method is forced to POST: most frameworks only honour
         # a method-override header on a POST request.
-        lname = header.lower()
-        headers = [
-            h for h in req.headers if h.split(":", 1)[0].strip().lower() != lname
-        ]
+        headers = without_headers(req.headers, [header])
         headers.append(f"{header}: {method}")
         return replace(req, method="POST", headers=headers)
 
@@ -165,18 +167,14 @@ class MethodTamper(BaseModule):
     def _request_override(self, req) -> tuple[str, str] | None:
         """Return (header_name, method) for the first override header present."""
         wanted = {h.lower() for h in self._override_headers}
-        for h in req.headers:
-            name, sep, value = h.partition(":")
-            if sep and name.strip().lower() in wanted:
-                return name.strip(), value.strip().upper()
+        for name, value in parse_headers(req.headers).items():
+            if name.lower() in wanted:
+                return name, value.strip().upper()
         return None
 
     @staticmethod
     def _allow_header(response) -> str | None:
-        for key, value in response.headers.items():
-            if key.lower() == "allow":
-                return value
-        return None
+        return response.headers.get("allow")
 
     def _findings(self, response) -> list[str]:
         method = response.request.method.upper()
@@ -227,50 +225,61 @@ class MethodTamper(BaseModule):
             return
 
         # Record every observation for the finalize() differences report.
-        matrix = context.data.setdefault(_MATRIX_KEY, {})
-        matrix.setdefault(response.request.url, {})[self._matrix_label(response)] = response.status
+        matrix = context.state.setdefault(_MATRIX_KEY, {})
+        req = response.request
+        entry = matrix.setdefault(req.seed_id, {"url": req.url,
+            "method": req.metadata.get("methodtamper.original_method", req.method.upper()),
+            "baseline": None, "variants": {}})
+        if req.metadata.get("methodtamper.baseline"):
+            entry["baseline"] = response.status
+        else:
+            entry["variants"][self._matrix_label(response)] = response.status
 
         findings = self._findings(response)
         if not findings:
             return
 
-        tally = context.data.setdefault(_FINDINGS_KEY, {})
+        tally = context.state.setdefault(_FINDINGS_KEY, {})
         for finding in findings:
             tally[finding] = tally.get(finding, 0) + 1
 
-        print(
+        self.report(response, context,
             f"[METHODTAMPER] {response.status} {self._matrix_label(response)} "
-            f"{response.request.url}  {' | '.join(findings)}"
+            f"{response.request.url}  {' | '.join(findings)}",
+            evidence={"findings": findings, "variant": self._matrix_label(response)}
         )
 
     async def finalize(self, context):
-        tally = context.data.get(_FINDINGS_KEY)
+        tally = context.state.get(_FINDINGS_KEY)
         if tally:
-            print("[METHODTAMPER] --- interesting method behaviours (unique) ---")
+            context.write("[METHODTAMPER] --- interesting method behaviours (unique) ---")
             for finding, count in sorted(tally.items()):
                 plural = "response" if count == 1 else "responses"
-                print(f"[METHODTAMPER]   {finding}  ({count} {plural})")
+                context.write(f"[METHODTAMPER]   {finding}  ({count} {plural})")
 
         self._report_differences(context)
 
     def _report_differences(self, context):
-        matrix = context.data.get(_MATRIX_KEY)
+        matrix = context.state.get(_MATRIX_KEY)
         if not matrix:
             return
         printed_header = False
-        for url in sorted(matrix):
-            labels = matrix[url]
-            baseline_label = self._original_method.get(url)
-            base_status = labels.get(baseline_label)
+        for entry in sorted(matrix.values(), key=lambda e: (e["url"], e["method"])):
+            url = entry["url"]
+            labels = entry["variants"]
+            baseline_label = entry["method"]
+            base_status = entry["baseline"]
+            if base_status is None:
+                continue
             diffs = sorted(
                 (label, status) for label, status in labels.items()
-                if label != baseline_label and status != base_status
+                if status != base_status
             )
             if not diffs:
                 continue
             if not printed_header:
-                print("[METHODTAMPER] --- response-code differences vs baseline ---")
+                context.write("[METHODTAMPER] --- response-code differences vs baseline ---")
                 printed_header = True
             base = f"{baseline_label}={base_status}" if base_status is not None else "baseline=?"
             changes = ", ".join(f"{label}={status}" for label, status in diffs)
-            print(f"[METHODTAMPER]   {url}  (baseline {base})  {changes}")
+            context.write(f"[METHODTAMPER]   {url}  (baseline {base})  {changes}")

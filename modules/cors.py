@@ -2,7 +2,9 @@ import argparse
 from dataclasses import replace
 from urllib.parse import urlsplit
 
+from core.tooltags import BurpTool
 from modules.base import BaseModule
+from core.headers import parse_headers, without_headers
 
 # Namespaced context key for the cross-response tally built in analyze_one and
 # emitted in finalize().
@@ -44,6 +46,8 @@ class Cors(BaseModule):
     Only headers are inspected, so needs_body is False (no bodies downloaded).
     """
 
+    tool = BurpTool.SCANNER
+
     # Header-only module: no need to read response bodies.
     needs_body = False
 
@@ -52,7 +56,7 @@ class Cors(BaseModule):
         self._filters = []
 
     def option_parser(self):
-        parser = argparse.ArgumentParser(prog="cors", add_help=False)
+        parser = argparse.ArgumentParser(prog="cors", add_help=False, allow_abbrev=False)
         parser.add_argument(
             "--evil-origin", metavar="ORIGIN", default=_DEFAULT_EVIL_ORIGIN,
             help="Arbitrary external Origin to test for reflection "
@@ -88,10 +92,7 @@ class Cors(BaseModule):
     def _with_origin(req, origin: str):
         # Build a fresh headers list (dropping any existing Origin) so replace()
         # never aliases and mutates the seed request's list across variants.
-        headers = [
-            h for h in req.headers
-            if h.split(":", 1)[0].strip().lower() != "origin"
-        ]
+        headers = without_headers(req.headers, ["origin"])
         headers.append(f"Origin: {origin}")
         return replace(req, headers=headers)
 
@@ -99,18 +100,11 @@ class Cors(BaseModule):
 
     @staticmethod
     def _request_origin(req) -> str | None:
-        for h in req.headers:
-            name, sep, value = h.partition(":")
-            if sep and name.strip().lower() == "origin":
-                return value.strip()
-        return None
+        return parse_headers(req.headers).get("origin")
 
     @staticmethod
     def _resp_header(response, name: str) -> str | None:
-        for key, value in response.headers.items():
-            if key.lower() == name:
-                return value
-        return None
+        return response.headers.get(name)
 
     @staticmethod
     def _classify(origin: str, req) -> str:
@@ -153,19 +147,20 @@ class Cors(BaseModule):
             finding += " with Access-Control-Allow-Credentials: true"
 
         # Accumulate a deduplicated tally for the finalize() summary.
-        tally = context.data.setdefault(_CONTEXT_KEY, {})
+        tally = context.state.setdefault(_CONTEXT_KEY, {})
         tally[finding] = tally.get(finding, 0) + 1
 
-        print(
+        self.report(response, context,
             f"[CORS] {response.status} {response.request.method} "
-            f"{response.request.url}  {finding}"
+            f"{response.request.url}  {finding}",
+            evidence={"origin": origin, "allow_origin": acao, "allow_credentials": creds}
         )
 
     async def finalize(self, context):
-        tally = context.data.get(_CONTEXT_KEY)
+        tally = context.state.get(_CONTEXT_KEY)
         if not tally:
             return
-        print("[CORS] --- CORS misconfigurations (unique) ---")
+        context.write("[CORS] --- CORS misconfigurations (unique) ---")
         for finding, count in sorted(tally.items()):
             plural = "response" if count == 1 else "responses"
-            print(f"[CORS]   {finding}  ({count} {plural})")
+            context.write(f"[CORS]   {finding}  ({count} {plural})")

@@ -36,7 +36,7 @@ async def drive(module, seeds, body_for, status_for=None):
     ctx = LeviosaContext()
     variants = list(await module.mutate(seeds, ctx))
     for v in variants:
-        meta = module._meta[id(v)]
+        meta = v.metadata["sqli"]
         body = body_for(meta, v)
         status = status_for(meta, v) if status_for else 200
         await module.analyze_one(response_for(v, status=status, body=body), ctx)
@@ -101,7 +101,8 @@ class TestMutate:
         req = make_request(params=[Param("query", "id", "5")])
         m = configured()
         variants = list(await m.mutate([req], LeviosaContext()))
-        assert variants[0] is req
+        assert variants[0] == req
+        assert variants[0].seed_id == req.seed_id
 
     async def test_one_variant_per_param_payload(self):
         params = [Param("query", "id", "5"), Param("query", "q", "x")]
@@ -117,7 +118,7 @@ class TestMutate:
         # find a variant injecting 'id' with a lone quote
         injected = [
             v for v in variants
-            if m._meta[id(v)][1] == "id" and m._meta[id(v)][3] == "'"
+            if v.metadata["sqli"][1] == "id" and v.metadata["sqli"][3] == "'"
         ][0]
         by_name = {p.name: p.value for p in injected.params}
         assert by_name["id"] == "5'"      # appended
@@ -128,7 +129,7 @@ class TestMutate:
         variants = list(await m.mutate(
             [make_request(params=[Param("query", "id", "5")])], LeviosaContext()
         ))
-        injected = [v for v in variants if m._meta[id(v)][3] == "'"][0]
+        injected = [v for v in variants if v.metadata["sqli"][3] == "'"][0]
         assert injected.params[0].value == "'"
 
     async def test_non_injectable_params_skipped(self):
@@ -136,7 +137,7 @@ class TestMutate:
         params = [Param("header", "X-Api", "k"), Param("query", "id", "5")]
         m = configured()
         variants = list(await m.mutate([make_request(params=params)], LeviosaContext()))
-        injected_names = {m._meta[id(v)][1] for v in variants} - {None}
+        injected_names = {v.metadata["sqli"][1] for v in variants} - {None}
         assert injected_names == {"id"}
 
     async def test_does_not_mutate_seed(self):
@@ -222,4 +223,4 @@ class TestFinalize:
     async def test_uses_namespaced_context_key(self):
         seeds = [make_request(params=[Param("query", "id", "5")])]
         ctx = await drive(configured(), seeds, lambda meta, v: CLEAN_BODY)
-        assert "sqli.results" in ctx.data
+        assert "sqli.results" in ctx.state

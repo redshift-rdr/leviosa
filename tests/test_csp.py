@@ -213,4 +213,4 @@ class TestOutput:
     async def test_findings_use_namespaced_context_key(self):
         m = ContentSecurityPolicy()
         ctx = await run(m, [make_response({"Content-Type": "text/html"})])
-        assert "csp.findings" in ctx.data
+        assert "csp.findings" in ctx.state
