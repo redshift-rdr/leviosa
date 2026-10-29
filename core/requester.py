@@ -6,7 +6,6 @@ import random
 import sys
 from collections.abc import AsyncIterator, Iterable
 from datetime import datetime
-from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 from multidict import CIMultiDict, MultiDict
@@ -26,40 +25,23 @@ from core.tooltags import BurpTool, validate_repeater_preview
 from core.timing import HumanPacer
 
 
-def resolve_proxy(
-    config: Config, use_burp: bool
-) -> tuple[str | None, aiohttp.BasicAuth | None]:
-    """
-    Decide the proxy for a batch of traffic. Precedence:
-
-    1. --no-proxy forces every request direct.
-    2. A module that opts in (use_burp=True) routes through the burp endpoint.
-    3. Otherwise --proxy (config.proxy_url), if set, is used.
-    4. Otherwise the request goes direct.
-
-    Returns (proxy_url, proxy_auth). Any credentials embedded in --proxy are
-    split into a BasicAuth object and stripped from the returned URL, so the
-    URL is safe to log.
-    """
-    if config.no_proxy:
-        return None, None
-    if use_burp:
-        return f"http://{config.burp_host}:{config.burp_port}", None
-    if config.proxy_url:
-        return _split_proxy_auth(config.proxy_url)
-    return None, None
+# Compatibility exports for callers of the original transport helpers.
+from core.proxies import resolve_proxy, split_proxy_auth as _split_proxy_auth, current_proxy_route
+from yarl import URL
 
 
-def _split_proxy_auth(url: str) -> tuple[str, aiohttp.BasicAuth | None]:
-    parts = urlsplit(url)
-    if not (parts.username or parts.password):
-        return url, None
-    auth = aiohttp.BasicAuth(parts.username or "", parts.password or "")
-    netloc = parts.hostname or ""
-    if parts.port:
-        netloc = f"{netloc}:{parts.port}"
-    clean = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
-    return clean, auth
+class RoutedRequest(CapturedRequest):
+    """Choose upstream per prepared URL, including redirects and query params."""
+    def __init__(self, method, url, *args, **kwargs):
+        super().__init__(method, url, *args, **kwargs)
+        route = current_proxy_route.get()
+        if route is not None:
+            config, fallback, fallback_auth = route
+            if config.no_proxy or config.burp or config.proxy_rules or config.proxy_url or config.proxy_default_url:
+                proxy, auth = resolve_proxy(config, url=self.url)
+            else:
+                proxy, auth = fallback, fallback_auth
+            self.update_proxy(URL(proxy) if proxy else None, auth, kwargs.get('proxy_headers'))
 
 
 def _build_kwargs(params: list[Param]) -> tuple[dict, CIMultiDict[str]]:
@@ -146,6 +128,7 @@ async def _send_one(
     headers, kwargs = _request_options(request)
     capture = Capture(config.max_body_bytes, _read_capped) if capture_traffic else None
     token = current_capture.set(capture)
+    route_token = current_proxy_route.set((config, proxy, proxy_auth))
     attempted_at = datetime.now()
     try:
         async with session.request(
@@ -181,6 +164,7 @@ async def _send_one(
                                traffic=capture.records if capture else [])
     finally:
         current_capture.reset(token)
+        current_proxy_route.reset(route_token)
 
 
 async def send(
@@ -221,8 +205,9 @@ async def send(
     so there is no cross-task sharing, no sentinel bookkeeping, and StopIteration
     is caught locally (PEP 479 safe).
 
-    `proxy`/`proxy_auth` are applied to every request (resolve_proxy decides
-    them per batch). If `logger` is given, prepared requests and capped response
+    `proxy`/`proxy_auth` are fallback transport arguments; explicit global Burp
+    mode and ordered endpoint rules are resolved for each prepared redirect hop.
+    If `logger` is given, prepared requests and capped response
     bodies are captured for each HTTP exchange (including redirect hops), even
     with read_body=False. Captures are discarded after their ACTIVITY rows are
     persisted; modules still receive an empty body when read_body=False.
@@ -235,6 +220,7 @@ async def send(
     """
     config.validate_timing()
     config.validate_auth()
+    config.validate_proxies()
     validate_repeater_preview(repeater_preview)
     if tool is None:
         tool = config.tool if config.tool is not None else BurpTool.REPEATER
@@ -246,7 +232,9 @@ async def send(
     timeout = aiohttp.ClientTimeout(total=config.timeout)
     connector = aiohttp.TCPConnector(ssl=False, limit=config.concurrency)
 
-    capture_options = {"request_class": CapturedRequest, "trace_configs": [trace_config()]} if logger else {}
+    capture_options = {"request_class": RoutedRequest}
+    if logger:
+        capture_options["trace_configs"] = [trace_config()]
     # Identity matrices must never carry Set-Cookie values between users.
     cookie_options = {} if store_response_cookies else {"cookie_jar": aiohttp.DummyCookieJar()}
     async with aiohttp.ClientSession(connector=connector, timeout=timeout,

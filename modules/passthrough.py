@@ -7,8 +7,7 @@ class PassthroughModule(BaseModule):
 
     tool = BurpTool.REPEATER
 
-    # Passthrough replays requests as-is, so its (typically low-volume) traffic
-    # is routed through burp for manual inspection.
+    # Legacy hint retained for compatibility; routing requires global --burp.
     use_burp = True
 
     def setup(self, args):

@@ -1,0 +1,24 @@
+# Rules are evaluated top-to-bottom against the complete prepared endpoint URL.
+# First enabled regex match wins. No match means direct unless a fallback exists.
+# Uncomment to set a fallback (CLI --proxy overrides this fallback):
+# default_proxy = "http://proxy.example:8080"
+
+[[rules]]
+name = "Local targets bypass upstream proxies"
+endpoint_regex = '^https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]+)?(?:/|$)'
+direct = true
+
+[[rules]]
+name = "Private API through the internal upstream"
+endpoint_regex = '^https://api\.internal\.example(?::443)?/'
+proxy = "http://proxy.internal.example:8080"
+
+[[rules]]
+name = "Other example endpoints through a different upstream"
+endpoint_regex = '^https?://(?:[^/]+\.)?example\.com(?::[0-9]+)?/'
+proxy = "http://proxy.example:8080"
+enabled = true
+
+# Proxy Basic authentication can be included in the URL:
+# proxy = "http://username:percent-encoded-password@proxy.example:8080"
+# To proxy every remaining endpoint, add a final rule with endpoint_regex = '.*'.

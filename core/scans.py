@@ -31,7 +31,7 @@ from modules.base import BaseModule
 
 _SETTINGS = {
     'concurrency', 'max_body_bytes', 'timeout', 'follow_redirects', 'no_proxy', 'proxy_url',
-    'burp_host', 'burp_port', 'human_mode', 'human_timing_min', 'human_timing_max',
+    'burp', 'proxy_config_path', 'burp_host', 'burp_port', 'human_mode', 'human_timing_min', 'human_timing_max',
     'random_timing', 'random_timing_min', 'random_timing_max', 'tool', 'log_enabled', 'verbose',
     'auth_check', 'auth_check_url', 'auth_success_text', 'auth_mechanism', 'auth_check_interval',
 }
@@ -103,6 +103,8 @@ def scan_config(definition: ScanDefinition, base: Config) -> Config:
     if 'tool' in settings:
         settings['tool'] = BurpTool(settings['tool'])
         settings['module_tools'] = {}
+    if 'proxy_config_path' in settings:
+        settings['proxy_config_path'] = _path(definition.path.parent, _string(settings['proxy_config_path'], 'proxy_config_path'))
     if 'database' in definition.data:
         settings['log_db_path'] = _path(definition.path.parent, definition.data['database'])
     return replace(base, **settings)
@@ -111,6 +113,7 @@ def scan_config(definition: ScanDefinition, base: Config) -> Config:
 def _validate_config(config):
     config.validate_timing()
     config.validate_auth()
+    config.validate_proxies()
     for key in ('follow_redirects', 'no_proxy', 'log_enabled', 'verbose'):
         if type(getattr(config, key)) is not bool:
             raise ValueError(f'{key} must be true or false')
@@ -255,6 +258,8 @@ def prepare_scan(definition, config, shared_parser, *, target=None, modules_dir=
         if not guard.bound:
             raise ValueError('No captured credentials on the authentication-check URL origin')
     inputs = [definition.path, *map(Path, protected_paths)]
+    if config.proxy_config_path:
+        inputs.append(Path(config.proxy_config_path))
     if not target.startswith(('http://', 'https://')):
         inputs.append(Path(target))
     steps = []

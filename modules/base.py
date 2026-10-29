@@ -36,10 +36,8 @@ class BaseModule(ABC):
 
     needs_body: bool = True
 
-    # Whether this module's traffic should be routed through the burp proxy.
-    # Default False: burp is opt-in per module now, since high-volume scans
-    # bloat the .burp file. When False the module uses --proxy if set, else goes
-    # direct. All traffic is recorded in the sqlite log regardless.
+    # Legacy compatibility hint, ignored by routing. --burp is explicit and global.
+    # Upstream rules and --no-proxy apply independently of module attributes.
     use_burp: bool = False
 
     def setup(self, args: list[str]) -> None:

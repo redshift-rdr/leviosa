@@ -10,7 +10,7 @@
 - a core async web request component which streams requests concurrently
 - can take in a URL, a list of URLs, or a JSON file of HTTP requests
 - can specify 'modules' which are loaded in at runtime. modules perform some action/mutation on the http requests provided to it, then use the web request component to send the requests, then can optionally perform some action/analysis on the responses
-- sends traffic **direct by default**. burpsuite is opt-in per module (`use_burp`), so high-volume scans don't bloat the `.burp` file. a `--proxy` flag routes non-burp traffic through any proxy (credentials supported), and `--no-proxy` forces everything direct.
+- sends traffic **direct by default**. `--burp` explicitly routes all traffic through Burp. Ordered endpoint regex rules select upstream proxies with direct exceptions; `--no-proxy` forces everything direct.
 - **logs all traffic** (every request/response) to a local sqlite db, so traffic that bypasses burp is still recorded for the engagement. path is configurable (`--log-db`, default `leviosa.db`); disable with `--no-log`.
 - emphasis on lightweight. the core should be lightweight, no bloat and unnecesary features. functionality should be added in modules.
 
@@ -67,23 +67,84 @@ leviosa http://target.local --follow-redirects   # or -L
 
 #### proxying
 
-By default nothing is proxied. Modules opt into burpsuite individually (via the
-`use_burp` class attribute), so only the traffic you care to inspect ends up in
-burp. Everything else is sent direct — or through a proxy of your choosing.
+By default every module and raw request goes direct. `--burp` enables Burp
+for the entire run; legacy module `use_burp` attributes no longer enable it.
 
 ```bash
-# Route non-burp traffic through a proxy (credentials optional)
-leviosa requests.json --proxy http://127.0.0.1:8081
+# Explicit Burp mode (default listener: 127.0.0.1:8080)
+leviosa requests.json --burp
+leviosa requests.json --module securityheaders --burp
+
+# Ordered upstream proxy rules, or one fallback proxy
+leviosa requests.json --proxy-config examples/proxies.toml
 leviosa requests.json --proxy http://user:pass@127.0.0.1:8081
 
-# Force everything direct, overriding both per-module burp opt-in and --proxy
+# Force direct connections, overriding Burp mode, rules and fallbacks
 leviosa requests.json --no-proxy
 ```
 
-Precedence per request: `--no-proxy` (direct) > module `use_burp` (burp) >
-`--proxy` (custom proxy) > direct. Credentials in a `--proxy` URL are passed as proxy authentication. The traffic
-log records actual application request headers, including authentication headers
-when present.
+Precedence per prepared endpoint: `--no-proxy` > `--burp` > first enabled
+matching proxy rule > `--proxy` / `[proxy].url` > proxy-file `default_proxy` > direct.
+`--no-burp` disables Burp enabled in configuration. Burp mode sends requests to
+Burp as the single outbound proxy; configure further upstream chaining inside
+Burp itself. This file configures leviosa's upstream selection, not Burp's settings.
+
+Proxy configuration is TOML, with ordered `[[rules]]`:
+
+```toml
+# Optional fallback; omit for direct connections when no rule matches.
+# default_proxy = "http://fallback.example:8080"
+
+[[rules]]
+name = "Private paths bypass proxies"
+endpoint_regex = '^https://app\.example/private(?:/|$)'
+direct = true
+
+[[rules]]
+name = "Application upstream"
+endpoint_regex = '^https://app\.example/'
+proxy = "http://user:password@upstream.example:8080"
+enabled = true
+
+[[rules]]
+name = "Catch-all upstream"
+endpoint_regex = '.*'
+proxy = "http://fallback.example:8080"
+```
+
+The first enabled matching rule wins, like
+[Burp's ordered upstream proxy rules](https://portswigger.net/burp/documentation/desktop/settings/network/connections).
+Specific exceptions belong above broad rules. Matchers are Python regular
+expressions searched against the complete prepared URL: scheme, host, port when
+present, path and query, including structured query parameters. URLs use aiohttp's
+normalization/escaping; default ports may be omitted. Anchor patterns when you
+want a host/path boundary. TOML literal strings (`'...'`) preserve regex backslashes.
+Each rule requires `endpoint_regex` and exactly one of `proxy` or `direct=true`;
+`name` and `enabled` are optional. Regexes, URLs and field types are validated
+before traffic, even for disabled rules.
+
+HTTP and HTTPS upstream proxies are supported, including HTTPS targets through
+CONNECT. Optional URL credentials use Basic proxy authentication; percent-encode
+reserved characters in usernames/passwords. SOCKS, NTLM, Burp configuration
+imports and multi-proxy chains are not implemented. Proxy authentication is kept
+separate from target authentication. Verbose routing summaries omit proxy
+credentials; normal wire traffic logs may contain authentication headers.
+
+Rules are re-evaluated for every redirect hop and authentication health-check
+endpoint. Selected proxy failures produce normal transport errors; there is no
+silent fallback to a direct connection or another upstream. Routing does not
+change activity categories, pacing, findings, or the ACTIVITY schema. See
+[examples/proxies.toml](examples/proxies.toml) for an editable example.
+
+In `leviosa.toml`, set `[burp].enabled = true` to enable Burp, configure its
+`host`/`port`, and/or set `[proxy].config_file = "proxies.toml"`. That path is
+relative to `leviosa.toml`. Scan TOML root settings support `burp = true` and
+`proxy_config_path = "proxies.toml"` (relative to the scan file), alongside the
+existing `proxy_url`, `burp_host`, `burp_port`, and `no_proxy`. CLI flags override
+configuration; `--proxy-config FILE` paths are relative to the working directory.
+`--validate-scan` checks the proxy file offline and protects it from being used
+as a traffic/results output file. A configured `no_proxy=true` still takes
+precedence over Burp mode.
 
 #### traffic logging
 
@@ -272,11 +333,14 @@ CLI flags always win over the TOML file. Relevant blocks:
 
 ```toml
 [burp]
-host = "127.0.0.1"  # burp endpoint used by modules that opt in via use_burp
+enabled = false       # --burp / --no-burp
+host = "127.0.0.1"  # listener used only when Burp mode is enabled
 port = 8080
 
 [proxy]
-url = "http://user:pass@127.0.0.1:8081"  # proxy for non-burp traffic (== --proxy)
+# Optional fallback proxy (== --proxy):
+# url = "http://user:pass@127.0.0.1:8081"
+# config_file = "proxies.toml" # ordered upstream rules (== --proxy-config)
 
 [concurrency]
 limit = 20          # max requests in flight (== --concurrency)
@@ -1135,3 +1199,123 @@ CLI settings override scan settings, which override `leviosa.toml`.
 `--no-auth-check` disables a configured guard. Checking is off by default.
 `--validate-scan` validates the settings and captured credential availability
 without making health requests or prompting.
+
+### Business logic checks
+
+```bash
+leviosa requests.json --module businesslogic
+leviosa requests.json --module businesslogic --logic-success-text '"order_id"'
+leviosa requests.json --module businesslogic --logic-rules examples/business-logic-rules.json
+```
+
+`businesslogic` skips requests without relevant inputs. Default probes target
+common price, total, amount, quantity, discount, balance and limit fields with
+negative, zero, fractional and large values. It also tests client-supplied
+admin/paid/verified flags, role/status/state/plan/tier values, invalid coupon
+codes and an invalid currency. It omits recognized fields and inserts
+conflicting duplicates for query/form inputs. These tests replay the original
+HTTP method and can create orders, change account state or consume credits;
+use disposable test data for state-changing endpoints.
+
+Inputs cover URL queries (including repeated names), query/form/JSON parameters,
+nested JSON parameters, and explicit JSON bodies. Form bracket names such as
+`items[0][quantity]` are recognized. Each probe changes one input; unrelated
+fields, authentication and CSRF values are preserved. Raw bodies are not parsed.
+There is one baseline per applicable seed and at most 80 probes, adjustable with
+`--logic-max-probes 1..1000`. The first matching inputs consume that budget.
+
+Default findings are **possible acceptance observations**: the original and
+mutated requests returned 2xx. `--logic-success-text TEXT` also requires that
+marker in both responses. A 2xx, matching response, or reflected value does not
+prove an order was placed, a price honored, or a workflow bypassed. Verify the
+resulting application state. Redirects, connection failures and failed baselines
+do not establish acceptance; redirects are not followed.
+
+For application-specific checks, `--logic-rules FILE` replaces the default
+heuristics with a nonempty JSON array of rejection expectations:
+
+```json
+[
+  {
+    "method": "POST",
+    "url": "https://app.example/api/orders",
+    "location": "json",
+    "parameter": "items/0/quantity",
+    "values": [-1, 0, 0.5],
+    "omit": true,
+    "success_text": "\"order_id\""
+  }
+]
+```
+
+This declares that the listed values, and omission when enabled, should be
+rejected. A successful baseline and probe containing the required success marker
+produce a **potential rejection-rule violation indicator**, still requiring
+business-state verification. Choose a marker specific to successful completion,
+not text shared with validation errors. Both `method` and the complete seed
+`url` match exactly; unmatched endpoints/fields are skipped. Locations are
+`query`, `form`, or `json`. `parameter` is the field name for query/form, or a
+JSON path without a leading slash (`items/0/quantity`). In JSON paths, escape
+`~` as `~0` and `/` as `~1`; structured JSON params prefix the path with the
+parameter name. Array indexes identify individual elements.
+
+`values` requires 1–100 finite JSON scalar values. Optional `omit` and `duplicate`
+flags default to false; `duplicate` applies only to query/form and appends the
+first configured value after the existing field. URL/form values are serialized
+as text (`true`, `false`, `null` for those JSON scalars), while JSON values retain
+their types. Values identical to the original are skipped for replacement.
+Rules may target custom fields beyond the built-in names. Rule file paths resolve
+relative to the scan TOML when used in step args.
+
+These are single-request input-trust checks. The module does not infer business
+policy, orchestrate multi-step workflows, test races, or verify coupon reuse,
+refund accounting, server-side totals or other persistent invariants automatically.
+
+### HTTP security headers
+
+All five HTTP header checks are provided by the single `securityheaders` module:
+
+```bash
+leviosa requests.json --module securityheaders --no-recommended
+```
+
+| Header | Checks |
+| --- | --- |
+| `Strict-Transport-Security` | Missing on HTTPS, absent/invalid/duplicate `max-age`, disabled or short lifetime, missing or malformed `includeSubDomains` |
+| `X-Frame-Options` | Missing framing protection, values other than `DENY`/`SAMEORIGIN`, duplicate header fields |
+| `X-Content-Type-Options` | Missing or non-`nosniff` value, duplicate header fields |
+| `Referrer-Policy` | Missing/empty/unrecognized values and weak effective policies, including comma-separated fallback lists and repeated header fields |
+| `Permissions-Policy` | Missing/empty/malformed policies, invalid allowlists/origins, repeated features, unrestricted or wildcard allowlists requiring review |
+
+The module replays requests without injecting payloads, inspects response headers,
+and emits structured findings plus a deduplicated summary. Redirects are not
+followed, so findings describe the initial response. Network failures are skipped.
+The module does not need response bodies; normal traffic logging can still read
+and retain capped bodies.
+
+HSTS absence is not flagged over HTTP, where browsers ignore it. The default
+minimum lifetime is one year; use `--hsts-min-age SECONDS` to change that threshold.
+Subdomain coverage is a hardening observation: verify every subdomain supports
+HTTPS before enabling it. Preload is not required or independently verified.
+
+A recognized restrictive enforcing CSP `frame-ancestors` policy can provide
+framing protection when X-Frame-Options is absent. Empty, bare-wildcard and
+report-only policies do not satisfy this fallback. This is a conservative check,
+not a complete browser CSP evaluator; the separate `csp` module audits CSP.
+
+Referrer fallback lists use the last recognized policy. Permissions-Policy
+supports empty allowlists, `self`, quoted origins, wildcard policies and reporting
+parameters. Repeated Permissions-Policy fields are combined; duplicate features
+are flagged. Unknown feature names are not rejected because browser support
+varies. Missing Permissions-Policy does not imply that every browser capability
+is enabled: individual features still have browser defaults. Broad allowlists
+are review observations, not proof of exploitability.
+
+`--no-recommended` retains **all five** checks and skips the existing additional
+Cross-Origin-* and deprecated X-XSS-Protection checks. Without it, those extra
+checks continue to run too.
+
+Parsing references: [HSTS](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Strict-Transport-Security),
+[X-Frame-Options](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Frame-Options),
+[Referrer-Policy](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Referrer-Policy),
+and [Permissions-Policy](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Permissions-Policy).

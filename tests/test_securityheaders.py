@@ -206,7 +206,7 @@ class TestReferrer:
 
 class TestRecommended:
     def test_missing_permissions_policy(self):
-        assert "missing Permissions-Policy (recommended)" in configured()._evaluate(
+        assert "missing Permissions-Policy" in configured()._evaluate(
             make_response(without("Permissions-Policy"))
         )
 
@@ -230,7 +230,7 @@ class TestRecommended:
         m.setup(["--no-recommended"])
         # A clean core response missing only recommended headers → no issues.
         issues = m._evaluate(make_response(
-            without("Permissions-Policy", "Cross-Origin-Opener-Policy",
+            without("Cross-Origin-Opener-Policy",
                     "Cross-Origin-Embedder-Policy", "Cross-Origin-Resource-Policy")
         ))
         assert issues == []
@@ -269,3 +269,117 @@ class TestOutput:
     async def test_findings_use_namespaced_context_key(self):
         ctx = await run(configured(), [make_response(without("Referrer-Policy"))])
         assert "securityheaders.findings" in ctx.state
+
+
+@pytest.mark.parametrize('value,fragment', [
+    ('max-age=31536000junk; includeSubDomains', 'invalid max-age'),
+    ('not-max-age=31536000; includeSubDomains', 'no max-age'),
+    ('max-age=-1; includeSubDomains', 'invalid max-age'),
+    ('max-age="31536000; includeSubDomains', 'invalid max-age'),
+    ('max-age=31536000; max-age=0; includeSubDomains', 'duplicate max-age'),
+    ('max-age=31536000; includeSubDomains=1', 'must not have a value'),
+])
+def test_malformed_hsts_directives(value, fragment):
+    assert any(fragment in issue for issue in configured()._evaluate(
+        make_response(CLEAN | {'Strict-Transport-Security': value})))
+
+
+def test_hsts_large_quoted_age_and_case_insensitive_directives():
+    for value in ['MAX-AGE="31536000"; INCLUDESUBDOMAINS', 'max-age=' + '9' * 5000 + '; includeSubDomains']:
+        assert configured()._evaluate(make_response(CLEAN | {'Strict-Transport-Security': value})) == []
+
+
+@pytest.mark.parametrize('value,issue', [
+    ('unsafe-url, strict-origin-when-cross-origin', False),
+    ('no-referrer, unsafe-url', True),
+    ('invalid, no-referrer, future-policy', False),
+    ('invalid', True), ('', True), ('UNSAFE-URL', True),
+])
+def test_referrer_fallback_policy(value, issue):
+    found = configured()._evaluate(make_response(CLEAN | {'Referrer-Policy': value}))
+    assert any('Referrer-Policy' in item for item in found) is issue
+
+
+@pytest.mark.parametrize('value', [
+    '', 'camera', "camera 'none'", 'camera=(*)', 'camera=(src)',
+    "camera=('self')", 'camera=(selfself)', 'camera=(self"https://a.test")',
+    'camera=("not-an-origin")', 'camera=(); microphone=()',
+    'camera=(),',
+])
+def test_permissions_malformed_values(value):
+    assert any('Permissions-Policy' in issue for issue in configured()._evaluate(
+        make_response(CLEAN | {'Permissions-Policy': value})))
+
+
+@pytest.mark.parametrize('value', [
+    'camera=(), microphone=(), geolocation=(self)',
+    'camera=(self "https://trusted.test")',
+    'camera=();report-to=endpoint',
+    'camera=();report-to="endpoint", microphone=()',
+    'future-feature=()',
+])
+def test_valid_permissions_allowlists_and_reporting_parameters(value):
+    assert configured()._evaluate(make_response(CLEAN | {'Permissions-Policy': value})) == []
+
+
+@pytest.mark.parametrize('value,fragment', [
+    ('camera=*', 'allows all origins'),
+    ('camera=("https://*.example.com")', 'wildcard origin'),
+    ('camera=(), camera=(self)', 'repeats feature'),
+])
+def test_permissions_broad_or_duplicate_directives(value, fragment):
+    assert any(fragment in issue for issue in configured()._evaluate(
+        make_response(CLEAN | {'Permissions-Policy': value})))
+
+
+def test_all_five_checks_remain_enabled_without_extra_recommendations():
+    module = SecurityHeaders()
+    module.setup(['--no-recommended'])
+    assert any('Permissions-Policy' in issue for issue in module._evaluate(
+        make_response(without('Permissions-Policy'))))
+    assert module.follow_redirects is False
+
+
+@pytest.mark.parametrize('header', ['Strict-Transport-Security', 'X-Frame-Options', 'X-Content-Type-Options'])
+def test_duplicate_single_value_headers(header):
+    from multidict import CIMultiDict
+    headers = CIMultiDict(CLEAN)
+    headers.add(header, CLEAN[header])
+    assert any(f'duplicate {header}' in issue for issue in configured()._evaluate(make_response(headers)))
+
+
+def test_multiple_referrer_and_permissions_header_fields_are_combined():
+    from multidict import CIMultiDict
+    headers = CIMultiDict(CLEAN)
+    headers.add('Referrer-Policy', 'unsafe-url')
+    headers.add('Permissions-Policy', 'camera=()')
+    issues = configured()._evaluate(make_response(headers))
+    assert any('may leak referrer' in issue for issue in issues)
+    assert not any('Permissions-Policy' in issue for issue in issues)
+
+
+@pytest.mark.parametrize('value', ['frame-ancestors', 'frame-ancestors *', 'frame-ancestors https://[',
+                                  "frame-ancestors *; frame-ancestors 'none'"])
+def test_unrestricted_or_invalid_csp_does_not_replace_xfo(value):
+    headers = without('X-Frame-Options') | {'Content-Security-Policy': value}
+    assert any('anti-clickjacking' in issue for issue in configured()._evaluate(make_response(headers)))
+
+
+def test_report_only_csp_does_not_replace_xfo():
+    headers = without('X-Frame-Options') | {'Content-Security-Policy-Report-Only': "frame-ancestors 'none'"}
+    assert any('anti-clickjacking' in issue for issue in configured()._evaluate(make_response(headers)))
+
+
+def test_invalid_hsts_threshold_rejected():
+    with pytest.raises(ValueError):
+        SecurityHeaders().setup(['--hsts-min-age', '0'])
+
+
+def test_restrictive_csp_combining_self_and_specific_origin():
+    headers = without('X-Frame-Options') | {'Content-Security-Policy': "frame-ancestors 'self' https://trusted.test"}
+    assert configured()._evaluate(make_response(headers)) == []
+
+
+def test_unknown_hsts_extension_does_not_corrupt_known_directive():
+    value = 'max-age=31536000; includeSubDomains; includeSubDomainsExtension=1'
+    assert configured()._evaluate(make_response(CLEAN | {'Strict-Transport-Security': value})) == []

@@ -299,6 +299,7 @@ class TestRunModules:
         assert recorded["read_body"] is True
 
     async def test_burp_module_routes_through_burp(self, cfg):
+        cfg.burp = True
         recorded = {}
 
         class BurpMod(BaseModule):

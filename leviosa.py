@@ -136,16 +136,20 @@ def build_parser() -> argparse.ArgumentParser:
         action=_ListModulesAction,
         help="List available modules, their descriptions and options, then exit",
     )
+    parser.add_argument('--burp', action=argparse.BooleanOptionalAction, default=None,
+                        help='Explicitly route all traffic through Burp (default off)')
+    parser.add_argument('--proxy-config', metavar='FILE',
+                        help='TOML file of ordered endpoint-regex upstream proxy rules')
     parser.add_argument(
         "--proxy",
         metavar="URL",
-        help="Route non-burp traffic through this proxy, credentials optional, "
+        help="Fallback proxy for traffic not matched by endpoint rules, credentials optional, "
              "e.g. --proxy http://user:pass@127.0.0.1:8081",
     )
     parser.add_argument(
         "--no-proxy",
         action="store_true",
-        help="Force all traffic direct, overriding per-module burp opt-in and --proxy",
+        help="Force all traffic direct, overriding Burp mode and all proxy rules",
     )
     parser.add_argument(
         "--log-db",
@@ -240,6 +244,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _apply_cli(config, args, parser, selected_modules=None):
+    if args.burp is not None:
+        config.burp = args.burp
+    if args.proxy_config is not None:
+        config.proxy_config_path = str(Path(args.proxy_config).expanduser().resolve())
     for field in ('auth_check', 'auth_check_url', 'auth_success_text', 'auth_mechanism', 'auth_check_interval'):
         value = getattr(args, field, None)
         if value is not None:
@@ -292,7 +300,8 @@ def _apply_cli(config, args, parser, selected_modules=None):
     try:
         config.validate_timing()
         config.validate_auth()
-    except ValueError as exc:
+        config.validate_proxies()
+    except (ValueError, OSError) as exc:
         parser.error(str(exc))
     if args.verbose:
         config.verbose = True
@@ -300,10 +309,15 @@ def _apply_cli(config, args, parser, selected_modules=None):
     if config.verbose:
         if config.no_proxy:
             proxy_info = "disabled (all traffic direct)"
-        elif config.proxy_url:
-            proxy_info = f"{config.proxy_url} (non-burp traffic)"
+        elif config.burp:
+            proxy_info = f"Burp at {config.burp_host}:{config.burp_port} (all traffic)"
+        elif config.proxy_rules:
+            proxy_info = f"{len(config.proxy_rules)} ordered endpoint rules; configured fallback or direct"
+        elif config.proxy_url or config.proxy_default_url:
+            from core.proxies import split_proxy_auth
+            proxy_info = split_proxy_auth(config.proxy_url or config.proxy_default_url)[0]
         else:
-            proxy_info = "direct (burp per-module opt-in only)"
+            proxy_info = "direct"
         print(f"[leviosa] proxy: {proxy_info}", file=sys.stderr)
         log_info = config.log_db_path if config.log_enabled else "disabled"
         print(f"[leviosa] traffic log: {log_info}", file=sys.stderr)
@@ -339,6 +353,8 @@ def _scan_main(parser, args, remaining):
             target = str(Path(target).expanduser().resolve())
         validation = ValidationParser(add_help=False, parents=[parser], allow_abbrev=False)
         protected = [Path("leviosa.toml").resolve()]
+        if config.proxy_config_path:
+            protected.append(Path(config.proxy_config_path))
         if args.cookie_from:
             protected.append(Path(args.cookie_from).resolve())
         plan = prepare_scan(
@@ -471,7 +487,7 @@ def main():
         else:
             # Raw dispatch: stream statuses as they complete. read_body=False since
             # we only print the status line; the logger still captures capped
-            # bodies. Proxy follows --proxy / direct (no burp opt-in).
+            # bodies. Global Burp mode and endpoint proxy rules apply here too.
             proxy, proxy_auth = resolve_proxy(config, use_burp=False)
 
             async def _raw():

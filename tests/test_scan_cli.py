@@ -140,6 +140,7 @@ args=["--no-recommended"]
     last = next(event for event in findings if event['step'] == 6)
     assert any('recommended' in issue for issue in first['evidence']['issues'])
     assert not any('recommended' in issue for issue in last['evidence']['issues'])
+    assert 'missing Permissions-Policy' in last['evidence']['issues']
 
 
 async def test_cli_overrides_target_paths_tools_and_cookie_refresh(site, tmp_path):

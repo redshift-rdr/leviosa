@@ -25,7 +25,7 @@ class TestResolveProxy:
         assert resolve_proxy(Config(), use_burp=False) == (None, None)
 
     def test_use_burp_routes_to_burp_endpoint(self):
-        c = Config(burp_host="127.0.0.1", burp_port=8080)
+        c = Config(burp=True, burp_host="127.0.0.1", burp_port=8080)
         url, auth = resolve_proxy(c, use_burp=True)
         assert url == "http://127.0.0.1:8080"
         assert auth is None
@@ -37,7 +37,7 @@ class TestResolveProxy:
         assert auth is None
 
     def test_burp_opt_in_beats_custom_proxy(self):
-        c = Config(proxy_url="http://127.0.0.1:8081")
+        c = Config(burp=True, proxy_url="http://127.0.0.1:8081")
         url, _ = resolve_proxy(c, use_burp=True)
         assert url == "http://127.0.0.1:8080"
 

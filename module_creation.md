@@ -86,10 +86,8 @@ class BaseModule(ABC):
     # logging still captures a capped body. With --no-log, reads are skipped.
     needs_body: bool = True
 
-    # Whether this module's traffic is routed through burpsuite. Default False:
-    # burp is opt-in per module, so high-volume scans don't bloat the .burp file.
-    # When False, traffic uses --proxy if set, else goes direct. Either way every
-    # request/response is recorded in the sqlite traffic log.
+    # Legacy compatibility attribute, ignored by routing.
+    # --burp / proxy configuration control routing globally.
     use_burp: bool = False
 
     def setup(self, args: list[str]) -> None:
@@ -140,7 +138,7 @@ class BaseModule(ABC):
 - **Emit through the reporter.** Use `self.report(response, context, message)` for findings and `context.write(message)` for summaries. Prefix terminal messages with `[MODULENAME]` by convention.
 - **Responses stream in completion order, one at a time.** `analyze_one` never sees the whole list. To compare across responses (baseline, counts, diffs) accumulate on `context.state` during `analyze_one`, then act in `finalize`.
 - **Set `needs_body = False`** if you only inspect status/headers: modules receive `response.body == b""`. Traffic logging still reads and stores bodies up to `config.max_body_bytes` (default 1 MB); `--no-log` skips those reads. The same cap applies when the module needs the body. SQLite stores only the eight Burp `ACTIVITY` columns; findings and summaries go through the console reporter.
-- **Set `use_burp = True`** to route this module's traffic through burpsuite. Default `False` sends it direct (or through `--proxy`). Reserve burp for low-volume modules whose traffic you want to inspect manually — high-volume fuzzers left on burp bloat the `.burp` file. Regardless of this setting, every request/response is recorded in the sqlite traffic log, and `--no-proxy` overrides `use_burp` to force direct.
+- **Proxy routing is global.** Default traffic is direct; `--burp` explicitly routes all traffic to Burp. Ordered endpoint regex rules, `--proxy` and `--no-proxy` configure upstream routing. Legacy module `use_burp` attributes are ignored. Traffic logging is independent of routing.
 
 ---
 
@@ -159,7 +157,7 @@ class MyCheck(BaseModule):
 `BaseModule` defaults to `BurpTool.REPEATER` for backwards-compatible custom
 modules. Choose `INTRUDER` for systematic path/parameter/identity iteration and
 `SCANNER` for automated security checks. Classification does not count requests,
-consume the seed stream or select a proxy. `use_burp` remains independent.
+consume the seed stream or select a proxy. Global proxy routing is independent.
 
 The loader sets `module.module_name` to the file name so CLI
 `--module-tool NAME=TAG` overrides use the public module name, even when its class
@@ -501,7 +499,7 @@ class ParamFuzzer(BaseModule):
 - [ ] Copying variants: `dataclasses.replace(req, url=...)` for **url-only** mutation; `replace(copy.deepcopy(req))` when mutating `params`/headers
 - [ ] Cross-response logic accumulates on `context.state` in `analyze_one` and emits in `finalize` (responses stream one at a time, in completion order)
 - [ ] `needs_body = False` set if only status/headers are inspected
-- [ ] `use_burp = True` set only if this module's (typically low-volume) traffic should be routed through burpsuite
+- [ ] Routing is left to global `--burp` / upstream proxy settings; module `use_burp` hints are ignored
 - [ ] Shared filters are automatic; any custom filters are returned from `request_filters()`
 - [ ] Findings emitted through `self.report()`; summaries through `context.write()`
 - [ ] `status == 0` means a network error — handle or filter as appropriate

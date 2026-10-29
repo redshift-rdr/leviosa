@@ -24,6 +24,7 @@ async def run_modules(
 ) -> None:
     config.validate_timing()
     config.validate_auth()
+    config.validate_proxies()
     if config.auth_check and auth_guard is None:
         from core.auth import AuthGuard
         auth_guard = AuthGuard(config, write=context.write)
@@ -53,9 +54,8 @@ async def run_modules(
         # mutate() returns a sync iterable (often a lazy generator); the engine
         # pulls it one request at a time, so nothing is fully materialised here.
         mutated = await module.mutate(seeds, module_context)
-        # Proxy is resolved per module: a module that opts into burp routes
-        # there, everything else follows --proxy / direct.
-        proxy, proxy_auth = resolve_proxy(config, module.use_burp)
+        # Batch fallback; the transport re-evaluates endpoint rules per hop.
+        proxy, proxy_auth = resolve_proxy(config)
         module_config = (config if module.follow_redirects is None else
                          replace(config, follow_redirects=module.follow_redirects))
         stream = send(

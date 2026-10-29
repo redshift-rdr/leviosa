@@ -8,16 +8,18 @@ from core.tooltags import BurpTool
 
 @dataclass
 class Config:
-    # Burp endpoint. Burp is no longer used by default: only modules that opt in
-    # via `use_burp = True` route their traffic here.
+    # Burp is an explicit global mode; module use_burp hints do not enable it.
+    burp: bool = False
     burp_host: str = "127.0.0.1"
     burp_port: int = 8080
     # Arbitrary proxy (optionally with embedded credentials, e.g.
-    # http://user:pass@host:8081) set via --proxy. Applies to all traffic that
-    # is not routed through burp.
+    # http://user:pass@host:8081) set via --proxy. Fallback after endpoint rules.
     proxy_url: str | None = None
-    # Force every request direct, overriding both per-module burp opt-in and
-    # --proxy (set by --no-proxy).
+    proxy_config_path: str | None = None
+    proxy_rules: tuple = field(default_factory=tuple)
+    proxy_default_url: str | None = None
+    _proxy_config_loaded: str | None = field(default=None, repr=False, compare=False)
+    # Force every request direct, overriding Burp mode and every proxy rule.
     no_proxy: bool = False
     concurrency: int = 20
     max_body_bytes: int = 1_048_576
@@ -47,6 +49,10 @@ class Config:
     auth_success_text: str | None = None
     auth_mechanism: str = "auto"
     auth_check_interval: int = 20
+
+    def validate_proxies(self) -> None:
+        from core.proxies import prepare_proxies
+        prepare_proxies(self)
 
     def validate_auth(self) -> None:
         from urllib.parse import urlsplit
@@ -91,6 +97,8 @@ def load_config(toml_path: str = "leviosa.toml") -> Config:
     with open(path, "rb") as f:
         data = tomllib.load(f)
     burp = data.get("burp", {})
+    if "enabled" in burp:
+        config.burp = burp["enabled"]
     if "host" in burp:
         config.burp_host = burp["host"]
     if "port" in burp:
@@ -98,6 +106,10 @@ def load_config(toml_path: str = "leviosa.toml") -> Config:
     proxy = data.get("proxy", {})
     if "url" in proxy:
         config.proxy_url = proxy["url"]
+    if "config_file" in proxy:
+        if not isinstance(proxy["config_file"], str) or not proxy["config_file"]:
+            raise ValueError("proxy.config_file must be a file path")
+        config.proxy_config_path = str((path.resolve().parent / proxy["config_file"]).resolve())
     concurrency = data.get("concurrency", {})
     if "limit" in concurrency:
         config.concurrency = concurrency["limit"]

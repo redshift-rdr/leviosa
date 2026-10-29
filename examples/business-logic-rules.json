@@ -1,0 +1,19 @@
+[
+  {
+    "method": "POST",
+    "url": "https://app.example/api/orders",
+    "location": "json",
+    "parameter": "items/0/quantity",
+    "values": [-1, 0, 0.5],
+    "omit": true,
+    "success_text": "\"order_id\""
+  },
+  {
+    "method": "POST",
+    "url": "https://app.example/api/orders",
+    "location": "json",
+    "parameter": "total",
+    "values": [-1, 0, 0.01],
+    "success_text": "\"order_id\""
+  }
+]
