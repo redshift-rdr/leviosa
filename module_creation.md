@@ -523,3 +523,10 @@ stream and HTTP session are shared across phases. Scan files can set
 therefore also controls preview order. `request.metadata["leviosa.tool"]` is
 reserved for the sender's actual per-request category; the sender preserves the
 request ID and does not modify input metadata.
+
+Modules whose probes depend on prior responses may set `max_concurrency = 1`.
+The runner caps that module's transport concurrency at the smaller of the global
+limit and `max_concurrency`, without changing other modules or shared config.
+The value must be a positive integer or `None`. This allows a lazy generator to
+consult `context.state` after each response and stop yielding further requests;
+`authentication` uses it to stop active login tests on lockout/rate-limit signals.

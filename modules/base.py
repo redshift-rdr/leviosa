@@ -33,6 +33,8 @@ class BaseModule(ABC):
     # None inherits the global setting; probes can inspect the initial response.
     follow_redirects: bool | None = None
     store_response_cookies: bool = True
+    # Optional per-module upper bound; never increases global concurrency.
+    max_concurrency: int | None = None
 
     needs_body: bool = True
 

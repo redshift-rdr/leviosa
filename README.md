@@ -1319,3 +1319,112 @@ Parsing references: [HSTS](https://developer.mozilla.org/en-US/docs/Web/HTTP/Ref
 [X-Frame-Options](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Frame-Options),
 [Referrer-Policy](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Referrer-Policy),
 and [Permissions-Policy](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Permissions-Policy).
+
+### Login authentication testing
+
+```bash
+# Default: inspect login pages without submitting captured credentials
+leviosa login-requests.json --module authentication
+
+# Active checks, using a disposable test account and a reliable success signal
+leviosa login-requests.json --module authentication --risky \
+  --login-success-text '"authenticated":true'
+
+# For a login whose successful response redirects to /account
+leviosa login-requests.json --module authentication --risky \
+  --login-success-location '^/account(?:/|$)'
+```
+
+`authentication` is restricted to login-like URL paths: login/signin,
+authenticate/auth, sessions, j_security_check, and OAuth token endpoints.
+Unrelated endpoints are skipped. Override detection with `--login-path REGEX`
+(applied to the URL path), or combine it with standard request filters.
+Password reset, registration, logout and account-management paths are not
+selected automatically.
+
+**Default mode makes no credential submissions or password guesses.** It sends
+one anonymous GET per selected endpoint, removing query parameters, body, cookies
+and credential headers. It audits:
+
+- HTTP transport and credentials already present in the captured URL query.
+- Password forms using GET, insecure or cross-origin actions, and unmasked
+  password-like fields. Cross-origin actions may be intentional identity providers.
+- Missing recognizable login-form CSRF fields as a review observation; JavaScript,
+  SameSite, Origin validation and other defenses are not inferred from HTML.
+- Common session-cookie security attributes and exposed internal-error signatures.
+
+The captured POST is not replayed in default mode. This applies to this module;
+other modules selected in the same run keep their own replay/mutation behavior.
+POST-only APIs may answer the
+anonymous GET with 405; their credential validation is tested only in risky mode.
+There are no wrong-password attempts against the captured user in default mode.
+
+**`--risky` enables all implemented active checks.** A nonempty
+`--login-success-text` (in a 2xx body) or `--login-success-location` (matching a 3xx
+Location header) is required. Redirects are not followed. Provide a current,
+known-good captured login for a disposable account: risky mode can lock it out,
+trigger alerts, authenticate other accounts, or consume one-time tokens.
+The suite includes:
+
+- A captured-credential baseline and a random nonexistent-user negative control.
+- A wrong password for the captured user, empty/missing user or password, and
+  JSON null-password checks.
+- SQL-style and JSON NoSQL-style authentication-bypass payloads.
+- Password case/whitespace handling, appended suffixes and NUL truncation.
+- Omission of recognized existing MFA/CAPTCHA fields (no CAPTCHA solving or evasion).
+- A small default-credential set (`admin/admin`, `admin/password`, `root/root`) and
+  common-password candidates for the captured user.
+- Explicit known/unknown-user error differences and a bounded repeated-failure
+  sample for observable lockout/rate-limit behavior.
+- On an accepted baseline: session-cookie rotation observations, missing no-store
+  cache directives, and literal password reflection. Cookie rotation findings
+  need confirmation that the captured cookie was an unauthenticated session.
+
+Username/password inputs are detected in query, form and JSON parameters, nested
+JSON, and raw JSON or URL-encoded bodies. Use `--login-user-field NAME_OR_PATH`
+and `--login-password-field NAME_OR_PATH` for custom names; JSON paths use the
+same escaped path convention as `businesslogic`. Missing or ambiguous fields
+skip active submission. Only captured GET/POST login flows are submitted.
+API refresh/auth-code requests without a username/password pair are not mutated.
+Other captured fields, including CSRF tokens and pre-login cookies, are retained
+in active requests. Response cookies are never carried into later probes.
+
+Active requests are sequential even when global concurrency is higher. By
+default at most 30 risky requests (including baseline and control) are generated
+per method/endpoint per module invocation, plus one anonymous page GET. Duplicate captures of that
+method/endpoint do not multiply attempts; the first usable capture is used.
+`--login-max-attempts 2..200` changes the cap, and
+`--login-failure-attempts 1..50` changes the final repeated-failure sample (default
+5). The total cap still applies, so a small cap may omit later test families.
+`--random-timing` can add the existing configurable delays between requests.
+
+`--login-passwords FILE` replaces the small common-password candidate list for
+the captured user and requires `--risky`; the default-credential pairs remain.
+Only the first `--login-max-attempts` nonempty UTF-8 lines are loaded, and the
+request cap also applies. Paths resolve relative to scan TOML for step args.
+There is no unbounded brute-force or credential-stuffing mode.
+
+The module stops remaining endpoint probes on HTTP 423/429, Retry-After, recognized
+English lockout/rate-limit/CAPTCHA error messages, transport errors, or inconclusive
+baseline/control checks. A signal on the anonymous page skips active probes too.
+These stops cannot guarantee avoiding lockout: earlier risky failures may already
+have triggered it. Unrecognized/localized messages can only be bounded by the
+configured request cap.
+
+A possible authentication weakness requires both an accepted baseline and a
+rejected invalid-account control, followed by a successful probe under the
+configured marker. HTTP 200 alone is not treated as successful login. Findings
+remain indicators: a reflected marker or a redirect is not independently verified
+protected-resource access. The bounded sample cannot prove a missing lockout
+policy, and differently worded errors are only an enumeration indicator.
+
+Active login request/response raw traffic is redacted in local SQLite, and
+findings omit submitted credentials, response bodies and query values. Ordinary
+proxy/server logs can still record submitted credentials. Default anonymous page
+traffic uses normal logging. Captured input files are never rewritten.
+
+The module does not orchestrate browser/SSO flows, refresh CSRF tokens, change or
+reset passwords, enroll/disable MFA, spray arbitrary users, or test every possible
+authentication weakness. Its risk separation reflects OWASP's notes on
+[enumeration lockout risks](https://wstg.owasp.org/latest/4-Web_Application_Security_Testing/03-Identity_Management/04-Account_Enumeration_and_Guessable_User_Account/)
+and [lockout testing](https://wstg.owasp.org/latest/4-Web_Application_Security_Testing/04-Authentication/03-Weak_Lock_Out_Mechanism/).

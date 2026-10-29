@@ -41,6 +41,9 @@ async def run_modules(
         if not auth_guard.bound:
             from core.auth import AuthenticationStopped
             raise AuthenticationStopped('No captured credentials on the authentication-check URL origin')
+    for module in modules:
+        if module.max_concurrency is not None and (type(module.max_concurrency) is not int or module.max_concurrency < 1):
+            raise ValueError('module max_concurrency must be a positive integer or None')
     for module, tool in zip(modules, tools):
         module_context = context.for_module()
         # Apply the module's request filters to a fresh view of the inputs before
@@ -56,8 +59,12 @@ async def run_modules(
         mutated = await module.mutate(seeds, module_context)
         # Batch fallback; the transport re-evaluates endpoint rules per hop.
         proxy, proxy_auth = resolve_proxy(config)
-        module_config = (config if module.follow_redirects is None else
-                         replace(config, follow_redirects=module.follow_redirects))
+        overrides = {}
+        if module.follow_redirects is not None:
+            overrides['follow_redirects'] = module.follow_redirects
+        if module.max_concurrency is not None:
+            overrides['concurrency'] = min(config.concurrency, module.max_concurrency)
+        module_config = replace(config, **overrides) if overrides else config
         stream = send(
             mutated,
             module_config,
