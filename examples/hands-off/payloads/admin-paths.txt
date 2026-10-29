@@ -1,0 +1,8 @@
+admin
+administrator
+admin/dashboard
+manage
+management
+console
+backoffice
+actuator

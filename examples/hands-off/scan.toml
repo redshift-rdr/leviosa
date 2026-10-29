@@ -1,0 +1,180 @@
+# All built-in modules, once each. See README.md before the first run.
+# Required application inputs are deliberately not bundled as live credentials.
+name = "hands-off-application-review"
+target = "inputs/requests.json"
+database = "traffic.sqlite"
+results = "results.jsonl"
+on_error = "continue"
+
+# Pacing applies to every request by classifying all steps as Repeater.
+human_mode = true
+human_timing_min = 2.0
+human_timing_max = 4.0
+random_timing = false
+tool = "Repeater"
+concurrency = 1
+repeater_preview = 0
+
+# No interactive credential refresh in this unattended profile.
+auth_check = false
+# Explicit --burp / --proxy-config can still override these defaults.
+burp = false
+no_proxy = false
+follow_redirects = false
+timeout = 15
+max_body_bytes = 262144
+
+# Most active steps sample a few seed requests, not generated probes.
+# JWT/upload/IDOR retain all applicable seeds so sampling cannot hide them.
+# All steps except authentication exclude login/account-management paths and
+# obvious destructive actions. These are input filters, not a safety boundary.
+
+[[steps]]
+name = "Baseline replay of read requests"
+module = "passthrough"
+filters = { methods = ["GET", "HEAD"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 40, sample_seed = 27 }
+
+[[steps]]
+name = "Login page audits; no credential submissions or guessing"
+module = "authentication"
+
+[[steps]]
+name = "All HTTP security headers"
+module = "securityheaders"
+filters = { methods = ["GET", "HEAD"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 40, sample_seed = 27 }
+
+[[steps]]
+name = "Content Security Policy"
+module = "csp"
+filters = { methods = ["GET"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 25, sample_seed = 27 }
+
+[[steps]]
+name = "Session cookie attributes"
+module = "sessioncookies"
+args = ["--session-cookie", "session", "--session-cookie", "sessionid", "--session-cookie", "sid", "--session-cookie", "JSESSIONID", "--session-cookie", "PHPSESSID", "--session-cookie", "ASP.NET_SessionId", "--session-cookie", "connect.sid", "--session-cookie", ".AspNetCore.Cookies"]
+filters = { methods = ["GET", "HEAD"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 40, sample_seed = 27 }
+
+[[steps]]
+name = "Software and version disclosure"
+module = "versiondisclosure"
+filters = { methods = ["GET", "HEAD"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 40, sample_seed = 27 }
+
+[[steps]]
+name = "CORS policy checks"
+module = "cors"
+filters = { methods = ["GET", "HEAD"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 15, sample_seed = 27 }
+
+[[steps]]
+name = "Authorization matrix across two real users and anonymous"
+module = "authz"
+args = ["--session", "user-a=inputs/user-a.json", "--session", "user-b=inputs/user-b.json", "--anonymous", "--compare-body", "--access-rules", "inputs/ownership-rules.json"]
+filters = { methods = ["GET"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 25, sample_seed = 27 }
+
+[[steps]]
+name = "Known owned objects across users"
+module = "idor"
+args = ["--session", "user-a=inputs/user-a.json", "--session", "user-b=inputs/user-b.json", "--anonymous", "--access-rules", "inputs/ownership-rules.json"]
+filters = { methods = ["GET"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*' }
+
+[[steps]]
+name = "JWT validation and weak-secret checks on token-bearing requests"
+module = "jwt"
+filters = { methods = ["GET", "POST"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*' }
+
+[[steps]]
+name = "Small administrative path discovery"
+module = "adminfinder"
+args = ["--admin-wordlist", "payloads/admin-paths.txt"]
+filters = { methods = ["GET"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 1, sample_seed = 27 }
+
+[[steps]]
+name = "Small sensitive file discovery"
+module = "sensitivefiles"
+args = ["--sensitive-wordlist", "payloads/sensitive-paths.txt"]
+filters = { methods = ["GET"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 1, sample_seed = 27 }
+
+[[steps]]
+name = "Small recursive path discovery"
+module = "pathfuzz"
+args = ["--wordlist", "payloads/paths.txt", "--recursive"]
+filters = { methods = ["GET"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 1, sample_seed = 27 }
+
+[[steps]]
+name = "Read-only method probes; write methods and overrides excluded"
+module = "methodtamper"
+args = ["--methods", "OPTIONS,TRACE,FOOBAR", "--no-override"]
+filters = { methods = ["GET"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 8, sample_seed = 27 }
+
+[[steps]]
+name = "Error-page inventory"
+module = "errorpages"
+args = ["--techniques", "not-found,bad-method,special-path,long-url", "--long-url-len", "2048"]
+filters = { methods = ["GET"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 4, sample_seed = 27 }
+
+[[steps]]
+name = "Error-induced internal information disclosure"
+module = "errordisclosure"
+args = ["--error-disclosure-path-length", "2048"]
+filters = { methods = ["GET", "POST"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 3, sample_seed = 27 }
+
+[[steps]]
+name = "External redirect input checks"
+module = "openredirect"
+filters = { methods = ["GET", "POST"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 8, sample_seed = 27 }
+
+[[steps]]
+name = "Short error-based SQL injection set; no cookie/header mutation"
+module = "sqli"
+args = ["--payloads", "payloads/sqli.txt", "--param-types", "query,json,form"]
+filters = { methods = ["GET", "POST"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 5, sample_seed = 27 }
+
+[[steps]]
+name = "Reflected input context checks"
+module = "xss"
+filters = { methods = ["GET", "POST"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 5, sample_seed = 27 }
+
+[[steps]]
+name = "Short reflected XSS payload set"
+module = "xsspayloads"
+args = ["--xss-payloads", "payloads/xss.txt"]
+filters = { methods = ["GET", "POST"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 5, sample_seed = 27 }
+
+[[steps]]
+name = "Paired arithmetic template probes"
+module = "ssti"
+args = ["--ssti-payloads", "payloads/ssti.txt"]
+filters = { methods = ["GET", "POST"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 4, sample_seed = 27 }
+
+[[steps]]
+name = "Marker-only POSIX Windows and PowerShell command probes"
+module = "commandinjection"
+args = ["--command-payloads", "payloads/commands.txt"]
+filters = { methods = ["GET", "POST"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 3, sample_seed = 27 }
+
+[[steps]]
+name = "Small Linux and Windows file inclusion set"
+module = "traversal"
+args = ["--traversal-payloads", "payloads/traversal.txt"]
+filters = { methods = ["GET", "POST"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 4, sample_seed = 27 }
+
+[[steps]]
+name = "In-band SSRF probes without an external callback dependency"
+module = "ssrf"
+args = ["--ssrf-payloads", "payloads/ssrf.txt"]
+filters = { methods = ["GET", "POST"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 3, sample_seed = 27 }
+
+[[steps]]
+name = "Built-in bounded XML entity and XInclude probes"
+module = "xxe"
+filters = { methods = ["GET", "POST"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 3, sample_seed = 27 }
+
+[[steps]]
+name = "Bounded business input trust and boundary checks"
+module = "businesslogic"
+args = ["--logic-max-probes", "12"]
+filters = { methods = ["GET", "POST"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*', sample = 5, sample_seed = 27 }
+
+[[steps]]
+name = "Multipart upload checks including in-memory EICAR"
+module = "fileupload"
+filters = { methods = ["POST"], path = '(?i)^(?!.*(?:^|/)(?:login|signin|sign-in|sign_in|authenticate|authentication|auth|oauth2?|sessions?|logout|signout|sign-out|register|signup|sign-up|(?:forgot|reset|change)[_-]?password|password(?:[_-](?:reset|change))?|mfa|otp|delete|remove|destroy|purge|checkout|payments?|pay|transfer|refund)(?:[/.]|$)).*' }

@@ -1,0 +1,7 @@
+api
+admin
+health
+status
+docs
+swagger
+openapi.json

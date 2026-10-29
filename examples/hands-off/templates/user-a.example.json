@@ -1,0 +1,10 @@
+[
+  {
+    "method": "GET",
+    "url": "https://app.example/api/me",
+    "headers": [
+      "Authorization: Bearer REPLACE_WITH_USER_A_TOKEN"
+    ],
+    "params": []
+  }
+]

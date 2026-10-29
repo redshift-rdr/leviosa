@@ -21,3 +21,9 @@ build/
 /example_db_log.sqlite-wal
 /example_db_log.sqlite-shm
 /example_db_log.sqlite-journal
+
+# Application-specific inputs and outputs for the hands-off scan profile
+/examples/hands-off/inputs/
+/examples/hands-off/traffic.sqlite
+/examples/hands-off/traffic.sqlite-*
+/examples/hands-off/results.jsonl

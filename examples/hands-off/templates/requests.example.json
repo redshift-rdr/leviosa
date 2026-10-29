@@ -1,0 +1,98 @@
+[
+  {
+    "method": "GET",
+    "url": "https://app.example/api/me",
+    "headers": [
+      "Authorization: Bearer REPLACE_WITH_USER_A_TOKEN"
+    ],
+    "params": []
+  },
+  {
+    "method": "GET",
+    "url": "https://app.example/api/search?q=notebook",
+    "headers": [
+      "Authorization: Bearer REPLACE_WITH_USER_A_TOKEN"
+    ],
+    "params": []
+  },
+  {
+    "method": "GET",
+    "url": "https://app.example/api/documents/42",
+    "headers": [
+      "Authorization: Bearer REPLACE_WITH_USER_A_TOKEN"
+    ],
+    "params": []
+  },
+  {
+    "method": "GET",
+    "url": "https://app.example/api/documents/43",
+    "headers": [
+      "Authorization: Bearer REPLACE_WITH_USER_B_TOKEN"
+    ],
+    "params": []
+  },
+  {
+    "method": "POST",
+    "url": "https://app.example/api/orders/validate",
+    "headers": [
+      "Authorization: Bearer REPLACE_WITH_USER_A_TOKEN"
+    ],
+    "params": [],
+    "body": {
+      "kind": "json",
+      "value": {
+        "items": [
+          {
+            "quantity": 2
+          }
+        ],
+        "total": 20
+      }
+    }
+  },
+  {
+    "method": "POST",
+    "url": "https://app.example/api/xml/validate",
+    "headers": [
+      "Content-Type: application/xml",
+      "Authorization: Bearer REPLACE_WITH_USER_A_TOKEN"
+    ],
+    "params": [],
+    "body": {
+      "kind": "raw",
+      "value": "<request><query>notebook</query></request>"
+    }
+  },
+  {
+    "method": "POST",
+    "url": "https://app.example/api/login",
+    "headers": [
+      "Content-Type: application/json"
+    ],
+    "params": [
+      {
+        "type": "json",
+        "name": "username",
+        "value": "REPLACE_WITH_LOGIN_USER"
+      },
+      {
+        "type": "json",
+        "name": "password",
+        "value": "REPLACE_WITH_LOGIN_PASSWORD"
+      }
+    ]
+  },
+  {
+    "method": "POST",
+    "url": "https://app.example/api/uploads",
+    "headers": [
+      "Content-Type: multipart/form-data; boundary=leviosa-example",
+      "Authorization: Bearer REPLACE_WITH_USER_A_TOKEN"
+    ],
+    "params": [],
+    "body": {
+      "kind": "raw",
+      "value": "--leviosa-example\r\nContent-Disposition: form-data; name=\"file\"; filename=\"note.txt\"\r\nContent-Type: text/plain\r\n\r\nleviosa inert upload example\r\n--leviosa-example--\r\n"
+    }
+  }
+]

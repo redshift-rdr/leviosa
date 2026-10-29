@@ -1,0 +1,18 @@
+[
+  {
+    "method": "GET",
+    "url": "https://app.example/api/documents/42",
+    "allowed": [
+      "user-a"
+    ],
+    "contains": "REPLACE_WITH_USER_A_OBJECT_MARKER"
+  },
+  {
+    "method": "GET",
+    "url": "https://app.example/api/documents/43",
+    "allowed": [
+      "user-b"
+    ],
+    "contains": "REPLACE_WITH_USER_B_OBJECT_MARKER"
+  }
+]

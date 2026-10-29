@@ -1,0 +1,8 @@
+.env
+.git/HEAD
+.git/config
+config.json
+backup.zip
+swagger.json
+openapi.json
+server-status

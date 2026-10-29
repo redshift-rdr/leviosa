@@ -1,0 +1,4 @@
+../../../../../../etc/passwd
+..\..\..\..\Windows\win.ini
+file:///etc/passwd
+file:///C:/Windows/win.ini

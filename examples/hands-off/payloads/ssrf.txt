@@ -1,0 +1,3 @@
+file:///etc/passwd
+file:///C:/Windows/win.ini
+http://127.0.0.1/

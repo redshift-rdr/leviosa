@@ -1428,3 +1428,25 @@ reset passwords, enroll/disable MFA, spray arbitrary users, or test every possib
 authentication weakness. Its risk separation reflects OWASP's notes on
 [enumeration lockout risks](https://wstg.owasp.org/latest/4-Web_Application_Security_Testing/03-Identity_Management/04-Account_Enumeration_and_Guessable_User_Account/)
 and [lockout testing](https://wstg.owasp.org/latest/4-Web_Application_Security_Testing/04-Authentication/03-Weak_Lock_Out_Mechanism/).
+
+### Full hands-off scan profile
+
+[examples/hands-off/scan.toml](examples/hands-off/scan.toml) runs all 27 current
+built-in modules once, with sequential human pacing (2–4 seconds), short payload
+sets and bounded seed sampling. All steps use Repeater so human mode applies to
+every module. Risky authentication checks and write-method tampering are disabled;
+other modules exclude captured authentication/account-management paths.
+
+Provide curated requests, two fresh user sessions and object-ownership rules
+using the [setup instructions and templates](examples/hands-off/README.md), then:
+
+```bash
+leviosa --scan examples/hands-off/scan.toml --validate-scan
+leviosa --scan examples/hands-off/scan.toml
+```
+
+Required application inputs are intentionally not populated with dummy sessions.
+Preflight fails until they exist. Once set up, no interactive refresh prompts
+are enabled. The profile is still an active scan: POST, upload and business-logic
+probes can change state, so use disposable test data. It does not run a scan merely
+by being added to the repository.
