@@ -198,12 +198,8 @@ async def test_chunked_request_raw_includes_transfer_framing(server):
 
 async def test_capture_matches_wire_with_stale_content_length(tmp_path):
     import asyncio
-    import inspect
-    import aiohttp
-    # Newer aiohttp constrains payload writes to the declared length. Capture
-    # must retain what was actually sent on either supported writer API.
-    limited = 'content_length' in inspect.signature(aiohttp.ClientRequest.write_bytes).parameters
-    expected_body = b'abc' if limited else b'abcdef'
+    # Captured lengths must be replaced with the actual outgoing byte length.
+    expected_body = b'abcdef'
     received = []
 
     async def handler(reader, writer):
@@ -224,6 +220,7 @@ async def test_capture_matches_wire_with_stale_content_length(tmp_path):
         req = LeviosaRequest('POST', url, ['Content-Length: 3'], [], body=RequestBody('raw', 'abcdef'))
         await logged([req], path)
         assert received[0].endswith(b'\r\n\r\n' + expected_body)
+        assert b'Content-Length: 6\r\n' in received[0]
         assert read_rows(path)[0]['REQUEST_RAW'].encode() == received[0]
     finally:
         server.close()

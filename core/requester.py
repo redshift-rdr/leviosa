@@ -113,6 +113,12 @@ def _request_options(request: LeviosaRequest):
             headers.setdefault("Content-Type", "application/json")
         else:
             kwargs["data"] = request.body.value
+    # Captured framing describes the original wire representation. JSON/form
+    # serialization and module mutations can change its byte length. Remove all
+    # copies after merging header parameters and let aiohttp frame the payload.
+    # This also avoids stale chunked encoding or a nonzero length with no body.
+    for name in ("Content-Length", "Transfer-Encoding"):
+        headers.popall(name, None)
     return transport_headers(headers), kwargs
 
 

@@ -72,6 +72,11 @@ Copy nested values before modifying them. Do not correlate through `id(req)`.
 Explicit bodies are mutually exclusive with JSON/form params. Repeated query,
 form and header fields retain their order; response headers provide `getall()`.
 Existing request-file syntax remains valid; README shows explicit body syntax.
+The transport removes captured Content-Length/Transfer-Encoding after merging
+raw headers and header params; aiohttp computes framing from the final payload.
+Module variants may share unmodified captured headers without causing stale
+length truncation. This normalization does not mutate seed/header objects.
+Raw bodies are entity bytes/text, not pre-chunked HTTP framing.
 
 ---
 

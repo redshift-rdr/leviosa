@@ -699,6 +699,15 @@ to work. Query and form params preserve repeated names, and headers accept both
 `get()` and `getall()` for repeated fields. This remains HTTP replay through
 aiohttp, rather than byte-for-byte replay of an entire captured HTTP message.
 
+Captured `Content-Length` and `Transfer-Encoding` headers (including copies in
+header parameters) are removed from the prepared request. aiohttp calculates
+framing from the actual outgoing payload, so JSON/form reserialization, Unicode
+encoding and module mutations cannot retain a shorter captured body length or
+conflicting chunked headers. Original input objects and files are preserved;
+the traffic log records the recalculated wire headers and full transmitted body.
+Explicit raw bodies represent entity data, not pre-chunked HTTP wire framing.
+`--max-body-bytes` limits response reads only, not outgoing request bodies.
+
 Traffic logs use only the Burp-compatible `ACTIVITY` schema described above.
 Request IDs, probe metadata, findings and response headers are not added to it.
 
