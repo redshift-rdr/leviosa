@@ -1469,3 +1469,24 @@ Preflight fails until they exist. Once set up, no interactive refresh prompts
 are enabled. The profile is still an active scan: POST, upload and business-logic
 probes can change state, so use disposable test data. It does not run a scan merely
 by being added to the repository.
+
+### Quick SQLite samples and full console dumps
+
+`sqlite_sample.py` is a standalone standard-library script. It opens the database
+read-only and prints column-labelled tables, wrapping multiline/long values.
+Wide schemas use a column/value table per row. Values are not truncated; binary
+cells use hex and terminal control sequences are escaped.
+
+```bash
+python sqlite_sample.py leviosa.db                 # 5 random rows per table
+python sqlite_sample.py leviosa.db -n 10           # 10 random rows per table
+python sqlite_sample.py leviosa.db --first 10      # first 10 rows per table
+python sqlite_sample.py leviosa.db --last 10       # last 10, newest/highest key first
+python sqlite_sample.py leviosa.db --dump          # all user tables and all rows
+python sqlite_sample.py leviosa.db --table ACTIVITY --width 160
+```
+
+`--all` aliases `--dump`; `--table` is repeatable. Without `--table`, all user
+tables are printed. First/last use rowid order, or primary-key order for
+WITHOUT ROWID tables, rather than a timestamp column. The dump is table data
+for the console, not a schema/SQL backup. The default path is `leviosa.db`.
