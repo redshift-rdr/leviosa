@@ -69,10 +69,16 @@ new `--log-db` and `--results` paths to keep separate runs.
 
 ## Defaults and coverage
 
-- Every step uses `Repeater`, `human_mode=true`, and a 2–4 second idle interval.
-  Thus all traffic is sequential and human-paced, including modules whose normal
-  category is Scanner/Intruder. There is no preview phase. Findings still name
-  the actual module. Native category overrides can change pacing behavior.
+- Each step starts with up to five generated requests tagged as `Repeater`,
+  paced with a 2–4 second idle interval (`human_mode=true`). Remaining requests
+  use the module's native Repeater/Scanner/Intruder category. Native Repeater
+  traffic stays human-paced; Scanner/Intruder traffic has no human-mode delay.
+  Concurrency remains one. Steps generating five requests or fewer run entirely
+  as Repeater. Explicit tool overrides still apply after the preview.
+- A five-second pause separates modules (`module_delay = 5.0`). Set it to zero
+  to disable it, or replace it with `module_delay_min = 3.0` and
+  `module_delay_max = 8.0` for a fresh random pause between modules. These are
+  root settings before the first `[[steps]]`; do not combine fixed and range settings.
 - Requests time out after 15 seconds and response reads are capped at 256 KiB.
 - Burp is off by default. Explicit `--burp`, `--proxy`, `--proxy-config` and
   `--no-proxy` remain available; proxy settings in your `leviosa.toml` can also

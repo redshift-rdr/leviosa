@@ -383,3 +383,73 @@ def test_impossible_seed_headers_fail_preflight_before_any_outputs(tmp_path):
     with pytest.raises(ValueError, match='input request 2'):
         plan_for(scan_file(tmp_path), target=str(inputs))
     assert not (tmp_path / 'traffic.sqlite').exists()
+
+
+@pytest.mark.parametrize('settings', [
+    'module_delay=-1', 'module_delay=true', 'module_delay="5"',
+    'module_delay=inf', 'module_delay=nan',
+    'module_delay_min=1', 'module_delay_max=2',
+    'module_delay_min=3\nmodule_delay_max=2',
+    'module_delay_min=-1\nmodule_delay_max=2',
+    'module_delay_min=0\nmodule_delay_max=inf',
+    'module_delay_min=false\nmodule_delay_max=2',
+    'module_delay=0\nmodule_delay_min=1\nmodule_delay_max=2',
+])
+def test_reject_invalid_module_delay(tmp_path, settings):
+    with pytest.raises(ValueError, match='module.delay|module delays'):
+        plan_for(scan_file(tmp_path, settings=settings + '\n'))
+
+
+@pytest.mark.parametrize(('settings', 'expected', 'bounds'), [
+    ('', [], None),
+    ('module_delay=0\n', [], None),
+    ('module_delay=2.5\n', [2.5, 2.5], None),
+    ('module_delay_min=1\nmodule_delay_max=4\n', [3, 3], (1, 4)),
+    ('module_delay_min=2\nmodule_delay_max=2\n', [2, 2], None),
+])
+async def test_delays_only_between_steps_including_recoverable_failure(
+        tmp_path, monkeypatch, settings, expected, bounds):
+    path = scan_file(tmp_path, steps='[[steps]]\nmodule="passthrough"\n' * 3,
+                     settings=settings)
+    plan = plan_for(path)
+    events, samples = [], []
+    async def run(*args, **kwargs):
+        events.append('run')
+        if events.count('run') == 2:
+            raise RuntimeError('recoverable')
+    async def wait(seconds):
+        events.append(seconds)
+    def uniform(lo, hi):
+        samples.append((lo, hi))
+        return 3
+    monkeypatch.setattr('core.scans.run_modules', run)
+    monkeypatch.setattr('core.scans.asyncio.sleep', wait)
+    monkeypatch.setattr('core.scans.random.uniform', uniform)
+    results = MemoryResults()
+    outcome = await run_scan(plan, output=ScanReporter(results, Terminal()))
+    assert outcome.completed == 2 and outcome.failed == 1
+    assert events == (['run', expected[0], 'run', expected[1], 'run']
+                      if expected else ['run'] * 3)
+    assert samples == ([bounds, bounds] if bounds else [])
+    delays = [event for event in results.events if event['event'] == 'module_delay']
+    assert [event['seconds'] for event in delays] == expected
+    assert [event['next_step'] for event in delays] == ([2, 3] if expected else [])
+
+
+async def test_cancellation_during_module_delay_stops_next_step(tmp_path, monkeypatch):
+    plan = plan_for(scan_file(tmp_path,
+        steps='[[steps]]\nmodule="passthrough"\n' * 2,
+        settings='module_delay=5\n'))
+    calls = []
+    async def run(*args, **kwargs):
+        calls.append('run')
+    async def wait(seconds):
+        raise asyncio.CancelledError
+    monkeypatch.setattr('core.scans.run_modules', run)
+    monkeypatch.setattr('core.scans.asyncio.sleep', wait)
+    results = MemoryResults()
+    with pytest.raises(asyncio.CancelledError):
+        await run_scan(plan, output=ScanReporter(results, Terminal()))
+    assert calls == ['run']
+    assert results.events[-1]['event'] == 'scan_finished'
+    assert results.events[-1]['status'] == 'interrupted'

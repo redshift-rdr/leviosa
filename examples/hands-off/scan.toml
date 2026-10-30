@@ -6,14 +6,18 @@ database = "traffic.sqlite"
 results = "results.jsonl"
 on_error = "continue"
 
-# Pacing applies to every request by classifying all steps as Repeater.
+# Pause between modules (seconds). Replace with both range settings to randomize.
+module_delay = 5.0
+# module_delay_min = 3.0
+# module_delay_max = 8.0
+
+# Pace the Repeater preview, then continue with each module's native category.
 human_mode = true
 human_timing_min = 2.0
 human_timing_max = 4.0
 random_timing = false
-tool = "Repeater"
 concurrency = 1
-repeater_preview = 0
+repeater_preview = 5
 
 # No interactive credential refresh in this unattended profile.
 auth_check = false

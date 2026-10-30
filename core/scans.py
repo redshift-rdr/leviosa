@@ -4,6 +4,7 @@ import copy
 import inspect
 import math
 import os
+import random
 import sqlite3
 import tomllib
 from collections.abc import Callable, Iterable
@@ -37,7 +38,8 @@ _SETTINGS = {
     'progress', 'progress_interval',
     'auth_check', 'auth_check_url', 'auth_success_text', 'auth_mechanism', 'auth_check_interval',
 }
-_ROOT_KEYS = _SETTINGS | {'name', 'target', 'database', 'results', 'modules_dir', 'steps', 'on_error', 'repeater_preview'}
+_ROOT_KEYS = _SETTINGS | {'name', 'target', 'database', 'results', 'modules_dir', 'steps', 'on_error', 'repeater_preview',
+                           'module_delay', 'module_delay_min', 'module_delay_max'}
 _STEP_KEYS = {'name', 'module', 'args', 'filters', 'tool', 'modules_dir', 'repeater_preview'}
 
 
@@ -50,6 +52,23 @@ def _string(value, label):
 def _path(base, value):
     path = Path(value).expanduser()
     return str((base / path).resolve())
+
+
+def _module_delay(data):
+    """Return validated inter-step delay bounds in seconds."""
+    ranged = 'module_delay_min' in data or 'module_delay_max' in data
+    if ranged and 'module_delay' in data:
+        raise ValueError('use module_delay OR module_delay_min/module_delay_max')
+    if ranged and not {'module_delay_min', 'module_delay_max'} <= data.keys():
+        raise ValueError('module_delay_min and module_delay_max must be supplied together')
+    minimum = data.get('module_delay_min', data.get('module_delay', 0))
+    maximum = data.get('module_delay_max', minimum)
+    for value in (minimum, maximum):
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            raise ValueError('module delays must be finite non-negative seconds')
+    if minimum > maximum:
+        raise ValueError('module_delay_min must not exceed module_delay_max')
+    return minimum, maximum
 
 
 def _unknown(data, allowed, label):
@@ -76,6 +95,7 @@ def read_scan(path: str) -> ScanDefinition:
     _unknown(data, _ROOT_KEYS, 'scan')
     if data.get('on_error', 'continue') != 'continue':
         raise ValueError('on_error must be "continue"; runtime module failures do not stop later steps')
+    _module_delay(data)
     name = _string(data.get('name', file.stem), 'scan name')
     validate_repeater_preview(data.get('repeater_preview', 5))
     steps = data.get('steps')
@@ -236,6 +256,8 @@ class PreparedScan:
     config: Config
     steps: list[PreparedStep]
     results: str | None
+    module_delay_min: float = 0
+    module_delay_max: float = 0
 
 
 def prepare_scan(definition, config, shared_parser, *, target=None, modules_dir=None,
@@ -321,7 +343,8 @@ def prepare_scan(definition, config, shared_parser, *, target=None, modules_dir=
         for req in source():
             yield replace(copy.deepcopy(req))
 
-    return PreparedScan(definition.name, target, replay, config, steps, results)
+    minimum, maximum = _module_delay(definition.data)
+    return PreparedScan(definition.name, target, replay, config, steps, results, minimum, maximum)
 
 
 @dataclass
@@ -343,7 +366,14 @@ async def run_scan(plan, *, output=None, logger=None, context=None):
     output.progress('scan_started', f'[SCAN] {plan.name}: starting {len(plan.steps)} steps',
                     target=plan.target, total=len(plan.steps))
     try:
-        for step in plan.steps:
+        for position, step in enumerate(plan.steps):
+            if position and plan.module_delay_max > 0:
+                delay = (plan.module_delay_min if plan.module_delay_min == plan.module_delay_max
+                         else random.uniform(plan.module_delay_min, plan.module_delay_max))
+                output.progress('module_delay',
+                                f'[SCAN] Waiting {delay:.2f}s before {step.name}',
+                                seconds=delay, next_step=step.index, next_step_name=step.name)
+                await asyncio.sleep(delay)
             scoped = output.scope(step=step.index, step_name=step.name,
                                   module=step.module.module_name, tool=str(step.config.tool))
             preview = f'; first {step.repeater_preview} requests as Repeater' if step.repeater_preview and step.config.tool != BurpTool.REPEATER else ''

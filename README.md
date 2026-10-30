@@ -497,6 +497,7 @@ results = "engagement.jsonl"
 human_mode = true
 repeater_preview = 5           # first five generated requests per step use Repeater
 on_error = "continue"
+module_delay = 5.0            # seconds between steps; default 0
 
 [[steps]]
 name = "baseline"
@@ -532,6 +533,15 @@ Optional root settings are `concurrency`, `max_body_bytes`, `timeout`,
 `random_timing`, `random_timing_min`, `random_timing_max` and `repeater_preview`. Use `no_proxy=true`
 for a direct scan. `modules_dir` selects custom modules globally, or put it on
 individual steps to mix custom and built-in modules.
+
+Use `module_delay = 5.0` at the scan root for a fixed pause between modules.
+For a fresh random pause at each transition, replace it with both
+`module_delay_min = 3.0` and `module_delay_max = 8.0`. Values are finite,
+non-negative seconds, and the minimum must not exceed the maximum. The default
+is zero. Pauses occur after completed or recoverable failed steps, before the
+next step, with no pause before the first or after the last. Console and JSONL
+progress include the chosen delay. This is independent of request pacing and
+activity tags; preflight validation does not wait.
 
 Steps accept `name`, `module`, `args`, `filters`, `tool`, `modules_dir` and
 `repeater_preview`. Filters
@@ -1451,9 +1461,11 @@ and [lockout testing](https://wstg.owasp.org/latest/4-Web_Application_Security_T
 ### Full hands-off scan profile
 
 [examples/hands-off/scan.toml](examples/hands-off/scan.toml) runs all 27 current
-built-in modules once, with sequential human pacing (2–4 seconds), short payload
-sets and bounded seed sampling. All steps use Repeater so human mode applies to
-every module. Risky authentication checks and write-method tampering are disabled;
+built-in modules once, with short payload sets and bounded seed sampling. Each
+step previews up to five requests as Repeater with 2–4 second human pacing, then
+uses the module's native activity category. Concurrency remains one; human pacing
+continues only for Repeater traffic. Risky authentication checks and write-method
+tampering are disabled;
 other modules exclude captured authentication/account-management paths.
 
 Provide curated requests, two fresh user sessions and object-ownership rules

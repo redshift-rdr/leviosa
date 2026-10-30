@@ -32,14 +32,17 @@ def prepared(tmp_path):
     return directory, plan
 
 
-def test_all_current_modules_included_exactly_once_and_human_paced(prepared):
+def test_all_current_modules_use_native_tags_after_human_paced_preview(prepared):
     directory, plan = prepared
     names = [step.module.module_name for step in plan.steps]
     assert Counter(names) == Counter(discover_modules())
     assert plan.config.human_mode and not plan.config.random_timing
     assert plan.config.concurrency == 1
     assert plan.config.human_timing_min == 2 and plan.config.human_timing_max == 4
-    assert all(step.config.tool == BurpTool.REPEATER and step.repeater_preview == 0 for step in plan.steps)
+    assert plan.module_delay_min == plan.module_delay_max == 5
+    assert plan.config.tool is None
+    assert all(step.config.tool == step.module.tool and step.repeater_preview == 5 for step in plan.steps)
+    assert {step.config.tool for step in plan.steps} == set(BurpTool)
     assert plan.config.burp is False and plan.config.no_proxy is False
     assert plan.config.auth_check is False
     assert plan.config.timeout == 15 and plan.config.max_body_bytes == 262144
@@ -99,7 +102,9 @@ async def test_all_steps_execute_offline_with_mocked_transport_and_do_not_submit
         nonlocal count
         visited.append(kwargs['module'])
         assert config.human_mode and config.concurrency == 1
-        assert kwargs['tool'] == BurpTool.REPEATER
+        module = next(step.module for step in plan.steps if type(step.module).__name__ == kwargs['module'])
+        assert kwargs['tool'] == module.tool
+        assert kwargs['repeater_preview'] == 5
         for req in requests:
             count += 1
             methods[req.method] += 1
@@ -114,10 +119,15 @@ async def test_all_steps_execute_offline_with_mocked_transport_and_do_not_submit
             pass
         def write(self, message):
             pass
+    delays = []
+    async def wait(seconds):
+        delays.append(seconds)
+    monkeypatch.setattr('core.scans.asyncio.sleep', wait)
     monkeypatch.setattr('core.runner.send', fake_send)
     result = await run_scan(plan, output=ScanReporter(terminal=Quiet()))
     assert result.completed == len(discover_modules()) and result.failed == 0
     assert len(visited) == len(plan.steps)
+    assert delays == [5] * (len(plan.steps) - 1)
     assert count > len(plan.steps)
     assert methods['POST'] > 0
     assert not (directory / 'traffic.sqlite').exists()
