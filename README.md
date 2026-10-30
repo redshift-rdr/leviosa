@@ -437,10 +437,9 @@ path → 404), `bad-method` (invalid verb → 405/501), `long-url` and
 params) and `junk-param` (adds hostile params so it works even with none).
 Restrict the set with `--techniques`. Each response is reported with the
 technique that induced it, plus any information-disclosure signatures found in
-the body; a per-status / per-signature summary prints at the end. Note that
-parameter injection only mutates params parsed into request objects (e.g. from a
-JSON request file) — for a bare URL carrying a `?query=...` string, `junk-param`
-provides the coverage.
+the body; a per-status / per-signature summary prints at the end. Parameter
+injection covers structured request params and query strings embedded in URLs,
+including repeated names and blank values.
 
 The `versiondisclosure` module sends requests unchanged and inspects only
 response headers. Bodies are captured only for traffic logging. Each response with a disclosure is
@@ -683,6 +682,7 @@ See `example_requests_input_file.json` for a full example. Each object in the ar
 ```
 
 Supported `params.type` values: `cookie`, `json`, `query`, `form`, `header`.
+`url` is accepted as an alias for `query` across all modules.
 
 
 An optional explicit `body` supports nested JSON, arrays and raw data:

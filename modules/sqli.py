@@ -1,6 +1,9 @@
 import argparse
 import re
 from dataclasses import replace
+from urllib.parse import parse_qsl, urlsplit
+
+from core.probes import url_query_variants
 
 from core.tooltags import BurpTool
 from modules.base import BaseModule
@@ -143,7 +146,8 @@ class SqlInjection(BaseModule):
                 raise RuntimeError(f"sqli: payload file {parsed.payloads!r} is empty")
         if parsed.param_types:
             self._param_types = [
-                t.strip().lower() for t in parsed.param_types.split(",") if t.strip()
+                "query" if t.strip().lower() == "url" else t.strip().lower()
+                for t in parsed.param_types.split(",") if t.strip()
             ]
         self._append = not parsed.replace
         self.parse_request_filters(args)
@@ -159,10 +163,16 @@ class SqlInjection(BaseModule):
                 (i, p) for i, p in enumerate(req.params)
                 if p.type in self._param_types
             ]
-            total = 1 + len(injectable) * len(self._payloads)
+            query_count = len(parse_qsl(urlsplit(req.url).query, keep_blank_values=True)) if "query" in self._param_types else 0
+            total = 1 + (len(injectable) + query_count) * len(self._payloads)
             original = replace(req, metadata={**req.metadata,
                 "sqli": (idx, None, None, None), "sqli.total": total})
             yield original
+            if query_count:
+                for payload in self._payloads:
+                    for location, name, variant in url_query_variants(original, payload, append=self._append):
+                        variant.metadata["sqli"] = (idx, name, location, payload)
+                        yield variant
             for i, param in injectable:
                 for payload in self._payloads:
                     variant = self._inject(original, i, payload)

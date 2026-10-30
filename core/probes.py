@@ -4,14 +4,20 @@ from dataclasses import replace
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
-def input_variants(request, payload):
-    """Yield one scalar input at a time; a callable supplies a fresh value per input."""
+def url_query_variants(request, payload, *, append=False):
+    """Mutate each URL query occurrence independently, retaining blanks and duplicates."""
     parts = urlsplit(request.url)
     query = parse_qsl(parts.query, keep_blank_values=True)
-    for index, (name, _) in enumerate(query):
+    for index, (name, value) in enumerate(query):
         values = list(query)
-        values[index] = (name, payload() if callable(payload) else payload)
+        injected = payload() if callable(payload) else payload
+        values[index] = (name, value + injected if append else injected)
         yield 'query', name, replace(request, url=urlunsplit(parts._replace(query=urlencode(values))))
+
+
+def input_variants(request, payload):
+    """Yield one scalar input at a time; a callable supplies a fresh value per input."""
+    yield from url_query_variants(request, payload)
     for index, param in enumerate(request.params):
         if param.type not in {'query', 'json', 'form'} or isinstance(param.value, (dict, list)):
             continue

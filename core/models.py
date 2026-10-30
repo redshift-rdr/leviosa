@@ -15,6 +15,12 @@ class Param:
     name: str
     value: Any
 
+    def __post_init__(self):
+        # Imported request files may call URL query parameters "url".
+        # Canonicalize before transport and module-specific input selection.
+        if self.type == "url":
+            self.type = "query"
+
 
 @dataclass
 class RequestBody:

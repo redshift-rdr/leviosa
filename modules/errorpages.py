@@ -4,6 +4,7 @@ import re
 from dataclasses import replace
 from urllib.parse import urlparse, urlunparse
 
+from core.probes import url_query_variants
 from core.tooltags import BurpTool
 from core.models import Param
 from modules.base import BaseModule
@@ -174,6 +175,9 @@ class ErrorPages(BaseModule):
         return replace(req, url=url)
 
     def _param_variants(self, req):
+        for payload in _BREAKERS:
+            for _, _, variant in url_query_variants(req, payload):
+                yield "param-injection", variant
         # Mutating Param values in place requires a deepcopy (replace would alias
         # the params list and corrupt sibling variants).
         injectable = [i for i, p in enumerate(req.params) if p.type in _INJECTABLE]
