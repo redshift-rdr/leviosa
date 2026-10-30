@@ -280,7 +280,7 @@ async def test_ssrf_real_controlled_fetch_and_interaction_log(tmp_path):
 
     async def listener(request):
         with interactions.open('a') as output:
-            output.write(json.dumps({'token': request.query['leviosa']}) + '\n')
+            output.write(json.dumps({'token': request.query['probe_token']}) + '\n')
         return web.Response(text='controlled-fetch-body-987')
 
     app = web.Application()
@@ -317,7 +317,7 @@ async def test_callback_inputs_get_unique_tokens_and_actual_preview_tags(tmp_pat
     async def send_one(session, request, config, read_body, proxy, auth, capture):
         meta = request.metadata[namespace]
         if not meta['baseline']:
-            token = re.search(r'leviosa=([a-f0-9]{32})', meta['payload'])[1]
+            token = re.search(r'probe_token=([a-f0-9]{32})', meta['payload'])[1]
             tokens.append(token)
             with interactions.open('a') as output:
                 output.write(json.dumps({'token': token}) + '\n')

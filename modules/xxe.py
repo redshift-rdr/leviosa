@@ -79,11 +79,11 @@ class Xxe(BaseModule):
     async def mutate(self, requests, context):
         def variants():
             for seed, req in enumerate(requests):
-                marker = 'leviosa' + uuid4().hex
+                marker = 'xxeprobe' + uuid4().hex
                 left, right = marker[:len(marker) // 2], marker[len(marker) // 2:]
                 layout = _xml_layout(req)
                 count = sum(1 for _ in input_variants(req, ''))
-                root = layout[1] if layout else 'leviosa'
+                root = layout[1] if layout else 'xxeprobe'
                 specs = []
                 if self._payloads is None:
                     for uri in ('file:///etc/passwd', 'file:///C:/Windows/win.ini'):

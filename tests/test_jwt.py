@@ -79,7 +79,7 @@ async def test_multiple_occurrences_replaced_together_and_distinct_tokens_separa
     assert sum(p.metadata['jwt']['probe'] == 'baseline' for p in probes) == 2
     invalid = next(p for p in probes if p.metadata['jwt']['probe'] == 'invalid-token')
     assert token() not in invalid.headers[0]
-    assert invalid.params[0].value == 'leviosa-invalid-token'
+    assert invalid.params[0].value == 'jwtprobe-invalid-token'
     assert invalid.params[1].value == token(b'other')
 
 

@@ -81,7 +81,7 @@ class CommandInjection(BaseModule):
                 count = sum(1 for _ in input_variants(request, ''))
                 if not count:
                     continue
-                marker = 'leviosa' + uuid4().hex
+                marker = 'cmdprobe' + uuid4().hex
                 total = 1 + count * len(self._payloads)
                 yield replace(request, metadata={**request.metadata,
                     'commandinjection': (index, None, None, None, marker, total)})

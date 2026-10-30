@@ -187,6 +187,7 @@ async def send(
     store_response_cookies: bool = True,
     repeater_preview: int = 0,
     auth_guard=None,
+    progress=None,
 ) -> AsyncIterator[LeviosaResponse]:
     """
     Send requests and yield each LeviosaResponse as it completes.
@@ -225,6 +226,7 @@ async def send(
     are never duplicated; normal Repeater batches retain their existing pacing.
     """
     config.validate_timing()
+    config.validate_progress()
     config.validate_auth()
     config.validate_proxies()
     validate_repeater_preview(repeater_preview)
@@ -255,6 +257,29 @@ async def send(
             result.metadata = {**req.metadata, 'leviosa.tool': str(category)}
             return result
 
+        def phase(message):
+            if progress is not None:
+                progress.set_phase(message)
+
+        async def perform(session, request, settings, need_body):
+            if progress is not None:
+                progress.started()
+            try:
+                response = await _send_one(session, request, settings, need_body,
+                                           proxy, proxy_auth, logger is not None)
+            except asyncio.CancelledError:
+                if progress is not None:
+                    progress.cancelled_request()
+                raise
+            except BaseException:
+                if progress is not None:
+                    progress.failed()
+                raise
+            else:
+                if progress is not None:
+                    progress.finished(response.status)
+                return response
+
         # Auth-enabled dispatch is sequential: no pending requests can leak past
         # a recovery prompt. Normal scans keep their sliding-window concurrency.
         if config.auth_check:
@@ -270,8 +295,7 @@ async def send(
                     connector=aiohttp.TCPConnector(ssl=False), timeout=timeout,
                     cookie_jar=aiohttp.DummyCookieJar(), **capture_options,
                 ) as check_session:
-                    response = await _send_one(check_session, request, check_config, True,
-                                               proxy, proxy_auth, logger is not None)
+                    response = await perform(check_session, request, check_config, True)
                 if logger is not None:
                     logger.log(response, tool=BurpTool.REPEATER)
                     response.traffic.clear()
@@ -279,20 +303,22 @@ async def send(
 
             for index, original in enumerate(req_iter):
                 auth_guard.bind(original)
+                phase('checking authentication')
                 await auth_guard.ensure(check_auth)
                 request = auth_guard.apply(original)
                 category = BurpTool.REPEATER if index < repeater_preview else tool
                 paced = config.human_mode and not config.random_timing and category == BurpTool.REPEATER
                 if paced:
+                    phase('pacing between requests')
                     await pacer.wait(config.human_timing_min, config.human_timing_max, config.verbose)
                 elif config.random_timing and index:
+                    phase('pacing between requests')
                     await asyncio.sleep(random.uniform(config.random_timing_min, config.random_timing_max))
                 # Response cookies from a prior request must not supersede a
                 # verified replacement, particularly raw Cookie headers.
                 session.cookie_jar.clear()
                 request = tagged(request, category)
-                response = await _send_one(session, request, config, read_body, proxy,
-                                           proxy_auth, logger is not None)
+                response = await perform(session, request, config, read_body)
                 if paced:
                     pacer.completed()
                 if logger is not None:
@@ -301,11 +327,13 @@ async def send(
                 # A deliberate denial is not proof the session expired. Verify
                 # the independent health endpoint before prompting.
                 if response.status in {401, 403} or 300 <= response.status < 400:
+                    phase('checking authentication')
                     await auth_guard.ensure(check_auth, force=True)
                 yield response
             return
 
         async def random_pause():
+            phase('pacing between requests')
             delay = random.uniform(config.random_timing_min, config.random_timing_max)
             if config.verbose:
                 print(f"[leviosa] random-timing: sleeping {delay:.2f}s", file=sys.stderr)
@@ -315,11 +343,11 @@ async def send(
         if tool != BurpTool.REPEATER:
             for req in islice(req_iter, repeater_preview):
                 if preview_human:
+                    phase('pacing between requests')
                     await pacer.wait(config.human_timing_min, config.human_timing_max, config.verbose)
                 elif config.random_timing and preview_sent:
                     await random_pause()
-                resp = await _send_one(session, tagged(req, BurpTool.REPEATER), config,
-                                       read_body, proxy, proxy_auth, logger is not None)
+                resp = await perform(session, tagged(req, BurpTool.REPEATER), config, read_body)
                 if preview_human:
                     pacer.completed()
                 preview_sent = True
@@ -332,11 +360,12 @@ async def send(
             first = not preview_sent
             for req in req_iter:
                 if human:
+                    phase('pacing between requests')
                     await pacer.wait(config.human_timing_min, config.human_timing_max, config.verbose)
                 elif not first:
                     await random_pause()
                 first = False
-                resp = await _send_one(session, tagged(req, tool), config, read_body, proxy, proxy_auth, logger is not None)
+                resp = await perform(session, tagged(req, tool), config, read_body)
                 if human:
                     pacer.completed()
                 if logger is not None:
@@ -347,7 +376,7 @@ async def send(
 
         def _spawn(req: LeviosaRequest) -> asyncio.Task:
             return asyncio.create_task(
-                _send_one(session, tagged(req, tool), config, read_body, proxy, proxy_auth, logger is not None)
+                perform(session, tagged(req, tool), config, read_body)
             )
 
         inflight: set[asyncio.Task] = set()

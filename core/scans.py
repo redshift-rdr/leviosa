@@ -26,6 +26,7 @@ from core.requester import _request_options
 from core.runner import run_modules
 from core.scanoutput import ResultsWriteError, ScanReporter
 from core.timing import HumanPacer
+from core.progress import ProgressWriteError
 from core.tooltags import BurpTool, resolve_module_tool, validate_repeater_preview
 from modules.base import BaseModule
 
@@ -33,6 +34,7 @@ _SETTINGS = {
     'concurrency', 'max_body_bytes', 'timeout', 'follow_redirects', 'no_proxy', 'proxy_url',
     'burp', 'proxy_config_path', 'burp_host', 'burp_port', 'human_mode', 'human_timing_min', 'human_timing_max',
     'random_timing', 'random_timing_min', 'random_timing_max', 'tool', 'log_enabled', 'verbose',
+    'progress', 'progress_interval',
     'auth_check', 'auth_check_url', 'auth_success_text', 'auth_mechanism', 'auth_check_interval',
 }
 _ROOT_KEYS = _SETTINGS | {'name', 'target', 'database', 'results', 'modules_dir', 'steps', 'on_error', 'repeater_preview'}
@@ -112,6 +114,7 @@ def scan_config(definition: ScanDefinition, base: Config) -> Config:
 
 def _validate_config(config):
     config.validate_timing()
+    config.validate_progress()
     config.validate_auth()
     config.validate_proxies()
     for key in ('follow_redirects', 'no_proxy', 'log_enabled', 'verbose'):
@@ -354,7 +357,7 @@ async def run_scan(plan, *, output=None, logger=None, context=None):
             except (KeyboardInterrupt, asyncio.CancelledError):
                 scoped.progress('step_finished', f'[SCAN] {step.name}: interrupted', status='interrupted')
                 raise
-            except (sqlite3.Error, ResultsWriteError, AuthenticationStopped) as exc:
+            except (sqlite3.Error, ResultsWriteError, AuthenticationStopped, ProgressWriteError) as exc:
                 if not isinstance(exc, ResultsWriteError):
                     scoped.emit('step_finished', status='failed',
                                 error={'type': type(exc).__name__, 'message': str(exc)})

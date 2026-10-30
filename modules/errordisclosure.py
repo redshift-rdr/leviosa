@@ -23,7 +23,7 @@ _SIGNATURES = [(name, pattern) for name, pattern in _SIGNATURES
     ('debug-info', re.compile(r'Symfony Profiler|display_errors\s*[=:]\s*(?:on|1)|'
                             r'debug(?:ging)? (?:mode|information)|application trace', re.I)),
 ]
-_PAYLOADS = ["'\"\\", '', 'leviosa-not-a-number', '-1', '999999999999999999999999999999', '[', '%']
+_PAYLOADS = ["'\"\\", '', 'errorprobe-not-a-number', '-1', '999999999999999999999999999999', '[', '%']
 
 
 def disclosures(body):
@@ -84,7 +84,7 @@ class ErrorDisclosure(BaseModule):
                 headers.append('Content-Type: application/json')
                 yield tag(replace(request, headers=headers,
                                   params=[p for p in request.params if p.type not in {'json', 'form'}],
-                                  body=RequestBody('raw', b'{"leviosa":')),
+                                  body=RequestBody('raw', b'{"errorprobe":')),
                           'malformed-json', 'body')
 
     async def analyze_one(self, response, context):

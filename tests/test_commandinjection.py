@@ -150,14 +150,14 @@ def test_missing_payload_file_rejected(tmp_path):
 
 def test_literal_custom_payload_and_placeholders_preserved(tmp_path):
     module = configured(tmp_path, '  ;if true; then {posix}; fi # ${HOME} %0a  ')
-    rendered = module._render(module._payloads[0], 'leviosa1234567890')
+    rendered = module._render(module._payloads[0], 'cmdprobe1234567890')
     assert rendered.startswith('  ;if true; then printf')
     assert rendered.endswith(' # ${HOME} %0a  ')
 
 
 def test_posix_marker_command_actually_produces_expected_output():
     # Execute only the fixed built-in printf command, never wordlist contents.
-    marker = 'leviosa1234567890abcdef'
+    marker = 'cmdprobe1234567890abcdef'
     command = CommandInjection._render('{posix}', marker)
     result = subprocess.run(['/bin/sh', '-c', command], capture_output=True, text=True, check=True)
     assert result.stdout == marker

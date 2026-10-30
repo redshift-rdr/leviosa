@@ -84,7 +84,7 @@ async def test_flags_workflow_and_invalid_coupon_probes():
     probes = await variants(req)
     assert any(p.body.value.get('isAdmin') is True for p in probes)
     assert any(p.body.value.get('status') == 'approved' for p in probes)
-    assert any(p.body.value.get('coupon') == 'LEVIOSA_INVALID_COUPON' for p in probes)
+    assert any(p.body.value.get('coupon') == 'BUSINESSLOGIC_INVALID_COUPON' for p in probes)
 
 
 async def test_probe_cap_and_lazy_inputs():

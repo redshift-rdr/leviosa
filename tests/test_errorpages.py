@@ -89,18 +89,18 @@ class TestInduction:
         m = ErrorPages()
         variants = induce(m, make_request("http://example.com/app"))
         urls = [v.url for v in variants["not-found"]]
-        assert urls == ["http://example.com/app/leviosa_404_probe_zzq7"]
+        assert urls == ["http://example.com/app/errorprobe_404_zzq7"]
 
     def test_not_found_on_bare_domain(self):
         m = ErrorPages()
         variants = induce(m, make_request("http://example.com"))
-        assert variants["not-found"][0].url == "http://example.com/leviosa_404_probe_zzq7"
+        assert variants["not-found"][0].url == "http://example.com/errorprobe_404_zzq7"
 
     def test_bad_method_changes_verb_only(self):
         m = ErrorPages()
         req = make_request("http://example.com/app", method="GET")
         variant = induce(m, req)["bad-method"][0]
-        assert variant.method == "LEVIOSA"
+        assert variant.method == "ERRORPROBE"
         assert variant.url == req.url
 
     def test_long_url_length(self):
@@ -113,7 +113,7 @@ class TestInduction:
     def test_special_path_present(self):
         m = ErrorPages()
         variant = induce(m, make_request("http://example.com/app"))["special-path"][0]
-        assert variant.url.startswith("http://example.com/app/leviosa")
+        assert variant.url.startswith("http://example.com/app/errorprobe")
 
     def test_param_injection_covers_each_param_and_payload(self):
         m = ErrorPages()
@@ -150,7 +150,7 @@ class TestInduction:
         variants = induce(m, make_request(params=[]))["junk-param"]
         assert len(variants) == 3
         for v in variants:
-            assert v.params[-1].name == "leviosa_test"
+            assert v.params[-1].name == "errorprobe_test"
             assert v.params[-1].type == "query"
 
     def test_restricted_techniques_only_emit_selected(self):

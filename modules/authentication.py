@@ -153,7 +153,7 @@ class Authentication(BaseModule):
                        metadata={**req.metadata, 'authentication': {'probe': 'page', 'audit': audit}})
 
     def active_probes(self, req, user, password):
-        unknown, wrong = 'leviosa-' + uuid4().hex[:16], 'Leviosa-invalid-' + uuid4().hex
+        unknown, wrong = 'authprobe-' + uuid4().hex[:16], 'authprobe-invalid-' + uuid4().hex
         if isinstance(user['value'], str) and '@' in user['value']:
             unknown += '@' + user['value'].rsplit('@', 1)[1]
         def edit(target, value, operation='replace'):
@@ -178,8 +178,8 @@ class Authentication(BaseModule):
             if original.swapcase() != original:
                 yield 'password-case', edit(password, original.swapcase())
             yield 'password-whitespace', edit(password, original + ' ')
-            yield 'password-suffix', edit(password, original + '-leviosa-invalid-suffix')
-            yield 'password-nul-truncation', edit(password, original + '\x00leviosa')
+            yield 'password-suffix', edit(password, original + '-authprobe-invalid-suffix')
+            yield 'password-nul-truncation', edit(password, original + '\x00authprobe')
         for target in inputs(req):
             if normalize(target['leaf']) in {'otp', 'totp', 'mfacode', 'verificationcode', 'captcha', 'captchatoken', 'grecaptcharesponse'}:
                 yield 'missing-second-factor-or-captcha', edit(target, None, 'omit')

@@ -751,7 +751,7 @@ Only response Set-Cookie headers are audited, so include login/refresh requests
 in the input to observe cookies being issued.
 
 `openredirect` sends unique HTTPS and scheme-relative destinations under
-`leviosa.invalid`. A finding requires a 301/302/303/307/308 Location resolving to
+`redirectprobe.invalid`. A finding requires a 301/302/303/307/308 Location resolving to
 the exact probe hostname. It never follows that redirect. It does not test
 JavaScript or HTML meta refresh redirects.
 
@@ -844,7 +844,7 @@ leviosa requests.json -m traversal \
 # For other files, supply a unique literal expected in the file's contents
 leviosa requests.json -m traversal \
   --traversal-payloads canary-paths.txt \
-  --traversal-marker 'leviosa-owned-test-file-7392'
+  --traversal-marker 'traversal-owned-test-file-7392'
 ```
 
 The built-in set includes absolute paths, relative paths at several depths,
@@ -1005,11 +1005,11 @@ built-in body mutation coverage.
 
 For blind SSRF/XXE, connect your own HTTP callback listener using
 `--ssrf-callback URL` / `--xxe-callback URL`. Each injected input gets an independent
-random token in the callback URL's `leviosa` query parameter. The supplied listener
+random token in the callback URL's `probe_token` query parameter. The supplied listener
 must record that query value in a local JSONL file, for example:
 
 ```json
-{"token":"value-of-the-leviosa-query-parameter"}
+{"token":"value-of-the-probe_token-query-parameter"}
 ```
 
 Create the log before the scan, then let the listener append complete JSON lines.
@@ -1490,3 +1490,49 @@ python sqlite_sample.py leviosa.db --table ACTIVITY --width 160
 tables are printed. First/last use rowid order, or primary-key order for
 WITHOUT ROWID tables, rather than a timestamp column. The dump is table data
 for the console, not a schema/SQL backup. The default path is `leviosa.db`.
+
+### Live request progress
+
+Progress reporting is enabled by default for raw dispatch, individual modules,
+and scan files. A starting line, a heartbeat every five seconds, and a final
+summary go to **stderr**, with immediate flushing:
+
+```text
+[PROGRESS] sqli: waiting for responses | sent=32 completed=30 in-flight=2 errors=0 elapsed=75s last-response=1s ago
+```
+
+The lines show the current module/scan step, dispatched and completed request
+attempts, in-flight count, transport/request errors, elapsed time and time since
+the last result. HTTP 4xx/5xx responses count as completed responses, not transport
+errors. Authentication health-check requests count too; redirect hops belong to
+one request attempt. Modules with no applicable requests finish with an explicit
+`no requests sent` message. Pacing, response analysis and module finalisation
+have distinct phase labels.
+
+Heartbeats remain visible during slow requests and human/random timing waits.
+Synchronous code that blocks the event loop can delay them; an interactive
+credential prompt has its own AUTH pause message. Counters use the existing lazy
+stream, so they do not pre-generate probes or invent a total/percentage/ETA.
+Progress contains no request URLs, headers, bodies or credential values. Existing
+findings, SQLite traffic and JSONL results keep their normal outputs; heartbeat
+lines are console status rather than finding events.
+
+```bash
+leviosa requests.json --module sqli --progress-interval 10
+leviosa --scan examples/hands-off/scan.toml --progress-interval 5
+leviosa requests.json --no-progress
+```
+
+In `leviosa.toml`:
+
+```toml
+[progress]
+enabled = true
+interval = 5.0
+```
+
+Scan TOML accepts root-level `progress = true` and `progress_interval = 5.0`.
+CLI flags override these settings; `--progress` enables a configured-disabled
+heartbeat, and `--no-progress` disables it. Existing scan step start/finish
+messages and raw HTTP status lines still appear. `--validate-scan` remains offline
+and does not start a heartbeat. Interval values must be finite and greater than 0.

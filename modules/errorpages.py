@@ -13,7 +13,7 @@ from modules.base import BaseModule
 _CONTEXT_KEY = "errorpages.stats"
 
 # Deterministic segment appended to induce a 404 (unlikely to exist).
-_NOT_FOUND_SEG = "leviosa_404_probe_zzq7"
+_NOT_FOUND_SEG = "errorprobe_404_zzq7"
 
 # All induction techniques, in the order they are applied per request.
 ALL_TECHNIQUES = [
@@ -156,12 +156,12 @@ class ErrorPages(BaseModule):
         if "not-found" in enabled:
             yield "not-found", self._url_variant(req, parsed, f"{base_path}/{_NOT_FOUND_SEG}")
         if "special-path" in enabled:
-            yield "special-path", self._url_variant(req, parsed, f"{base_path}/leviosa'\";<>()")
+            yield "special-path", self._url_variant(req, parsed, f"{base_path}/errorprobe'\";<>()")
         if "long-url" in enabled:
             yield "long-url", self._url_variant(req, parsed, f"{base_path}/{'L' * self._long_url_len}")
         if "bad-method" in enabled:
             # url-only in spirit: only the verb changes, headers/params are read-only.
-            yield "bad-method", replace(req, method="LEVIOSA")
+            yield "bad-method", replace(req, method="ERRORPROBE")
         if "param-injection" in enabled:
             yield from self._param_variants(req)
         if "junk-param" in enabled:
@@ -188,7 +188,7 @@ class ErrorPages(BaseModule):
         # request carries no params of its own.
         for payload in _BREAKERS[:3]:
             variant = replace(copy.deepcopy(req))
-            variant.params.append(Param(type="query", name="leviosa_test", value=payload))
+            variant.params.append(Param(type="query", name="errorprobe_test", value=payload))
             yield "junk-param", variant
 
     @staticmethod

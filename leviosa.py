@@ -23,6 +23,7 @@ from core.models import LeviosaContext
 from core.parsers import request_source
 from core.requester import resolve_proxy, send
 from core.runner import run_modules
+from core.progress import Progress
 from core.tooltags import BurpTool, parse_module_tools, resolve_module_tool
 from core.scans import read_scan, scan_config, prepare_scan, run_scan
 from core.scanoutput import JsonlResults, ScanReporter
@@ -239,11 +240,19 @@ def build_parser() -> argparse.ArgumentParser:
                         help='Credential to refresh; auto prefers Bearer when both are present')
     parser.add_argument('--auth-check-interval', type=int,
                         help='Check before every N scan requests (default: 20), plus after 401/403/redirects')
+    parser.add_argument('--progress', action=argparse.BooleanOptionalAction, default=None,
+                        help='Show periodic request progress on stderr (default: enabled)')
+    parser.add_argument('--progress-interval', type=float, metavar='SECONDS',
+                        help='Seconds between progress lines (default: 5)')
     add_filter_args(parser)
     return parser
 
 
 def _apply_cli(config, args, parser, selected_modules=None):
+    if args.progress is not None:
+        config.progress = args.progress
+    if args.progress_interval is not None:
+        config.progress_interval = args.progress_interval
     if args.burp is not None:
         config.burp = args.burp
     if args.proxy_config is not None:
@@ -299,6 +308,7 @@ def _apply_cli(config, args, parser, selected_modules=None):
         config.human_mode = True
     try:
         config.validate_timing()
+        config.validate_progress()
         config.validate_auth()
         config.validate_proxies()
     except (ValueError, OSError) as exc:
@@ -491,28 +501,30 @@ def main():
             proxy, proxy_auth = resolve_proxy(config, use_burp=False)
 
             async def _raw():
-                guard = None
-                if config.auth_check:
-                    from core.auth import AuthGuard, AuthenticationStopped
-                    guard = AuthGuard(config)
-                    for seed in source():
-                        guard.bind(seed)
-                        if guard.bound:
-                            break
-                    if not guard.bound:
-                        raise AuthenticationStopped('No captured credentials on the authentication-check URL origin')
-                stream = send(
-                    source(),
-                    config,
-                    read_body=False,
-                    proxy=proxy,
-                    proxy_auth=proxy_auth,
-                    logger=logger,
-                    **({"auth_guard": guard} if guard is not None else {}),
-                )
-                async with aclosing(stream) as responses:
-                    async for resp in responses:
-                        print(f"{resp.status} {resp.request.method} {resp.request.url}")
+                with Progress('requests', enabled=config.progress, interval=config.progress_interval) as progress:
+                    guard = None
+                    if config.auth_check:
+                        from core.auth import AuthGuard, AuthenticationStopped
+                        guard = AuthGuard(config)
+                        for seed in source():
+                            guard.bind(seed)
+                            if guard.bound:
+                                break
+                        if not guard.bound:
+                            raise AuthenticationStopped('No captured credentials on the authentication-check URL origin')
+                    stream = send(
+                        source(),
+                        config,
+                        read_body=False,
+                        proxy=proxy,
+                        proxy_auth=proxy_auth,
+                        logger=logger,
+                        **({"progress": progress} if config.progress else {}),
+                        **({"auth_guard": guard} if guard is not None else {}),
+                    )
+                    async with aclosing(stream) as responses:
+                        async for resp in responses:
+                            print(f"{resp.status} {resp.request.method} {resp.request.url}")
 
             try:
                 asyncio.run(_raw())

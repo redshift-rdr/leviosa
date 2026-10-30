@@ -28,7 +28,7 @@ class Ssrf(BaseModule):
         parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
         parser.add_argument('--ssrf-payloads', metavar='FILE', help='Payload file; optional {callback} placeholder')
         parser.add_argument('--ssrf-marker', action='append', default=[], metavar='TEXT', help='Expected controlled endpoint response text (repeatable)')
-        parser.add_argument('--ssrf-callback', metavar='URL', help='Controlled HTTP(S) callback endpoint; receives a leviosa query token')
+        parser.add_argument('--ssrf-callback', metavar='URL', help='Controlled HTTP(S) callback endpoint; receives a probe_token query token')
         parser.add_argument('--ssrf-interactions', metavar='FILE', help='Listener JSONL with exact token fields; checked at finalize')
         return parser
 

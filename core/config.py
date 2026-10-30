@@ -31,6 +31,8 @@ class Config:
     tool: BurpTool | None = None
     module_tools: dict[str, BurpTool] = field(default_factory=dict)
     verbose: bool = False
+    progress: bool = True
+    progress_interval: float = 5.0
     # Local sqlite traffic log. Captures every request/response the tool sends,
     # so traffic that bypasses burp is still recorded for the engagement.
     log_enabled: bool = True
@@ -49,6 +51,17 @@ class Config:
     auth_success_text: str | None = None
     auth_mechanism: str = "auto"
     auth_check_interval: int = 20
+
+    def validate_progress(self) -> None:
+        if type(self.progress) is not bool:
+            raise ValueError("progress must be true or false")
+        value = self.progress_interval
+        try:
+            valid = type(value) in (int, float) and math.isfinite(value) and value > 0
+        except OverflowError:
+            valid = False
+        if not valid:
+            raise ValueError("progress_interval must be a finite positive number")
 
     def validate_proxies(self) -> None:
         from core.proxies import prepare_proxies
@@ -130,6 +143,13 @@ def load_config(toml_path: str = "leviosa.toml") -> Config:
         raise ValueError("unknown auth configuration option")
     for key, value in auth.items():
         setattr(config, names[key], value)
+    progress = data.get("progress", {})
+    if not isinstance(progress, dict) or progress.keys() - {"enabled", "interval"}:
+        raise ValueError("progress must be a table with enabled/interval options")
+    if "enabled" in progress:
+        config.progress = progress["enabled"]
+    if "interval" in progress:
+        config.progress_interval = progress["interval"]
     log = data.get("log", {})
     if "enabled" in log:
         config.log_enabled = log["enabled"]

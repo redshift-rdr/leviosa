@@ -86,13 +86,13 @@
     "method": "POST",
     "url": "https://app.example/api/uploads",
     "headers": [
-      "Content-Type: multipart/form-data; boundary=leviosa-example",
+      "Content-Type: multipart/form-data; boundary=uploadprobe-example",
       "Authorization: Bearer REPLACE_WITH_USER_A_TOKEN"
     ],
     "params": [],
     "body": {
       "kind": "raw",
-      "value": "--leviosa-example\r\nContent-Disposition: form-data; name=\"file\"; filename=\"note.txt\"\r\nContent-Type: text/plain\r\n\r\nleviosa inert upload example\r\n--leviosa-example--\r\n"
+      "value": "--uploadprobe-example\r\nContent-Disposition: form-data; name=\"file\"; filename=\"note.txt\"\r\nContent-Type: text/plain\r\n\r\ngeneric inert upload example\r\n--uploadprobe-example--\r\n"
     }
   }
 ]

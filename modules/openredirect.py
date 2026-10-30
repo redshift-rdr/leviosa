@@ -17,7 +17,7 @@ class OpenRedirect(BaseModule):
     async def mutate(self, requests, context):
         def variants():
             for request in requests:
-                host = f'{uuid4().hex}.leviosa.invalid'
+                host = f'{uuid4().hex}.redirectprobe.invalid'
                 for payload in (f'https://{host}/', f'//{host}/'):
                     for location, name, variant in input_variants(request, payload):
                         yield replace(variant, metadata={**variant.metadata,

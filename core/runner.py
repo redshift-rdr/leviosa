@@ -9,6 +9,7 @@ from core.requester import resolve_proxy, send
 from modules.base import BaseModule
 from core.tooltags import resolve_module_tool, validate_repeater_preview
 from core.timing import HumanPacer
+from core.progress import Progress
 
 
 async def run_modules(
@@ -23,6 +24,7 @@ async def run_modules(
     auth_guard=None,
 ) -> None:
     config.validate_timing()
+    config.validate_progress()
     config.validate_auth()
     config.validate_proxies()
     if config.auth_check and auth_guard is None:
@@ -46,43 +48,52 @@ async def run_modules(
             raise ValueError('module max_concurrency must be a positive integer or None')
     for module, tool in zip(modules, tools):
         module_context = context.for_module()
-        # Apply the module's request filters to a fresh view of the inputs before
-        # mutate() sees them (e.g. keep only POSTs, or a random sample). Filters
-        # compose in declared order; default is none.
-        seeds = requests_factory()
-        if auth_guard is not None:
-            seeds = auth_guard.seeds(seeds)
-        for request_filter in (*module.cli_filters, *module.request_filters()):
-            seeds = request_filter.apply(seeds)
-        # mutate() returns a sync iterable (often a lazy generator); the engine
-        # pulls it one request at a time, so nothing is fully materialised here.
-        mutated = await module.mutate(seeds, module_context)
-        # Batch fallback; the transport re-evaluates endpoint rules per hop.
-        proxy, proxy_auth = resolve_proxy(config)
-        overrides = {}
-        if module.follow_redirects is not None:
-            overrides['follow_redirects'] = module.follow_redirects
-        if module.max_concurrency is not None:
-            overrides['concurrency'] = min(config.concurrency, module.max_concurrency)
-        module_config = replace(config, **overrides) if overrides else config
-        stream = send(
-            mutated,
-            module_config,
-            read_body=module.needs_body,
-            proxy=proxy,
-            proxy_auth=proxy_auth,
-            logger=logger,
-            module=type(module).__name__,
-            tool=tool,
-            pacer=pacer,
-            store_response_cookies=module.store_response_cookies,
-            repeater_preview=repeater_preview,
-            **({"auth_guard": auth_guard} if auth_guard is not None else {}),
-        )
-        # aclosing guarantees the engine's finally block runs (cancelling any
-        # in-flight tasks, closing the session) even if analyze_one raises or a
-        # KeyboardInterrupt lands mid-stream.
-        async with aclosing(stream) as responses:
-            async for resp in responses:
-                await module.analyze_one(resp, module_context)
-        await module.finalize(module_context)
+        name = module.module_name or type(module).__name__
+        fields = getattr(context.reporter, 'fields', {})
+        if isinstance(fields, dict) and fields.get('step'):
+            name = f'step {fields["step"]} {name}'
+        with Progress(name, enabled=config.progress, interval=config.progress_interval) as progress:
+            # Apply the module's request filters to a fresh view of the inputs before
+            # mutate() sees them (e.g. keep only POSTs, or a random sample). Filters
+            # compose in declared order; default is none.
+            seeds = requests_factory()
+            if auth_guard is not None:
+                seeds = auth_guard.seeds(seeds)
+            for request_filter in (*module.cli_filters, *module.request_filters()):
+                seeds = request_filter.apply(seeds)
+            # mutate() returns a sync iterable (often a lazy generator); the engine
+            # pulls it one request at a time, so nothing is fully materialised here.
+            mutated = await module.mutate(seeds, module_context)
+            # Batch fallback; the transport re-evaluates endpoint rules per hop.
+            proxy, proxy_auth = resolve_proxy(config)
+            overrides = {}
+            if module.follow_redirects is not None:
+                overrides['follow_redirects'] = module.follow_redirects
+            if module.max_concurrency is not None:
+                overrides['concurrency'] = min(config.concurrency, module.max_concurrency)
+            module_config = replace(config, **overrides) if overrides else config
+            progress.set_phase('dispatching requests')
+            stream = send(
+                mutated,
+                module_config,
+                read_body=module.needs_body,
+                proxy=proxy,
+                proxy_auth=proxy_auth,
+                logger=logger,
+                module=type(module).__name__,
+                tool=tool,
+                pacer=pacer,
+                store_response_cookies=module.store_response_cookies,
+                repeater_preview=repeater_preview,
+                **({"progress": progress} if config.progress else {}),
+                **({"auth_guard": auth_guard} if auth_guard is not None else {}),
+            )
+            # aclosing guarantees the engine's finally block runs (cancelling any
+            # in-flight tasks, closing the session) even if analyze_one raises or a
+            # KeyboardInterrupt lands mid-stream.
+            async with aclosing(stream) as responses:
+                async for resp in responses:
+                    progress.set_phase('analysing responses')
+                    await module.analyze_one(resp, module_context)
+            progress.set_phase('finalising module')
+            await module.finalize(module_context)

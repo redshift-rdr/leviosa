@@ -87,21 +87,21 @@ class FileUpload(BaseModule):
             raw = raw.encode('utf-8') if isinstance(raw, str) else raw
             for start, end, field, original_name in parts:
                 probes = [
-                    ('control', 'leviosa.txt', 'text/plain'),
-                    ('script-extension', 'leviosa.php', 'application/octet-stream'),
-                    ('double-extension', 'leviosa.php.jpg', 'image/jpeg'),
-                    ('mime-mismatch', 'leviosa.jpg', 'image/jpeg'),
-                    ('filename-traversal', '../leviosa-upload.txt', 'text/plain'),
+                    ('control', 'uploadprobe.txt', 'text/plain'),
+                    ('script-extension', 'uploadprobe.php', 'application/octet-stream'),
+                    ('double-extension', 'uploadprobe.php.jpg', 'image/jpeg'),
+                    ('mime-mismatch', 'uploadprobe.jpg', 'image/jpeg'),
+                    ('filename-traversal', '../uploadprobe-upload.txt', 'text/plain'),
                 ]
                 if not self.skip_eicar:
-                    probes += [('eicar', 'leviosa-eicar.com', 'application/octet-stream'),
-                               ('eicar-disguised', 'leviosa-eicar.txt', 'text/plain')]
+                    probes += [('eicar', 'uploadprobe-eicar.com', 'application/octet-stream'),
+                               ('eicar-disguised', 'uploadprobe-eicar.txt', 'text/plain')]
                 for probe, filename, mime in probes:
                     disposition = Message()
                     disposition.add_header('Content-Disposition', 'form-data', name=field, filename=filename)
                     disposition['Content-Type'] = mime
                     head = disposition.as_bytes(policy=SMTP)
-                    payload = eicar_bytes() if probe.startswith('eicar') else b'leviosa inert upload probe\n'
+                    payload = eicar_bytes() if probe.startswith('eicar') else b'uploadprobe inert upload probe\n'
                     metadata = {**req.metadata, 'fileupload': {
                         'probe': probe, 'field': field, 'filename': filename,
                         'original_filename': original_name, 'mime': mime}}

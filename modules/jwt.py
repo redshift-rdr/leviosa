@@ -135,17 +135,17 @@ class JWT(BaseModule):
 
     def token_probes(self, token, header, payload, key):
         first, second, signature = token.split('.')
-        yield 'invalid-token', 'leviosa-invalid-token'
+        yield 'invalid-token', 'jwtprobe-invalid-token'
         raw_signature = decode(signature)
-        corrupt = bytes([raw_signature[0] ^ 1]) + raw_signature[1:] if raw_signature else b'leviosa-invalid'
+        corrupt = bytes([raw_signature[0] ^ 1]) + raw_signature[1:] if raw_signature else b'jwtprobe-invalid'
         yield 'invalid-signature', first + '.' + second + '.' + encode(corrupt)
         yield 'empty-signature', first + '.' + second + '.'
         for algorithm in ('none', 'None', 'NONE', 'nOnE'):
             yield 'alg-' + algorithm, build({**header, 'alg': algorithm}, payload)
-        tampered = {**payload, 'leviosa_probe': True}
+        tampered = {**payload, 'jwtprobe_probe': True}
         yield 'tampered-payload', first + '.' + encode(json.dumps(tampered).encode()) + '.' + signature
         # Attacker-selected symmetric JWK tests trust in a token-supplied key.
-        attacker_key = b'leviosa-jwt-test-key'
+        attacker_key = b'jwtprobe-jwt-test-key'
         yield 'embedded-jwk', build({**header, 'alg': 'HS256', 'jwk': {'kty': 'oct', 'k': encode(attacker_key)}}, tampered, attacker_key)
         yield 'kid-empty-key', build({**header, 'alg': 'HS256', 'kid': ''}, tampered, b'')
         if self.public_key and header['alg'].startswith(('RS', 'PS', 'ES')):
@@ -156,9 +156,9 @@ class JWT(BaseModule):
             yield 'expired-claim', build(header, {**payload, 'exp': now - 86400}, key)
             yield 'future-nbf', build(header, {**payload, 'nbf': now + 86400}, key)
             if 'aud' in payload:
-                yield 'wrong-audience', build(header, {**payload, 'aud': 'leviosa-invalid-audience'}, key)
+                yield 'wrong-audience', build(header, {**payload, 'aud': 'jwtprobe-invalid-audience'}, key)
             if 'iss' in payload:
-                yield 'wrong-issuer', build(header, {**payload, 'iss': 'leviosa-invalid-issuer'}, key)
+                yield 'wrong-issuer', build(header, {**payload, 'iss': 'jwtprobe-invalid-issuer'}, key)
 
     async def mutate(self, requests, context):
         return self._variants(requests)

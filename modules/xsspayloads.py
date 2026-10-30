@@ -110,7 +110,7 @@ class XssPayloads(BaseModule):
                 inputs = sum(1 for _ in input_variants(request, ''))
                 if not inputs:
                     continue
-                marker = 'leviosa' + uuid4().hex
+                marker = 'xssprobe' + uuid4().hex
                 payloads = [payload.replace('{marker}', marker) for payload in self._payloads]
                 total = 1 + inputs * len(payloads)
                 yield replace(request, metadata={**request.metadata,

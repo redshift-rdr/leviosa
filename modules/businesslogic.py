@@ -20,8 +20,8 @@ _FLAGS = {'isadmin', 'admin', 'ispaid', 'paid', 'verified', 'isverified', 'appro
           'isapproved', 'authorized', 'isauthorized'}
 _STATES = {'role': ['admin'], 'userrole': ['admin'], 'status': ['approved', 'completed'],
            'state': ['approved', 'completed'], 'plan': ['premium'], 'tier': ['premium'],
-           'coupon': ['LEVIOSA_INVALID_COUPON'], 'couponcode': ['LEVIOSA_INVALID_COUPON'],
-           'promocode': ['LEVIOSA_INVALID_COUPON'], 'currency': ['LEVIOSA_INVALID_CURRENCY']}
+           'coupon': ['BUSINESSLOGIC_INVALID_COUPON'], 'couponcode': ['BUSINESSLOGIC_INVALID_COUPON'],
+           'promocode': ['BUSINESSLOGIC_INVALID_COUPON'], 'currency': ['BUSINESSLOGIC_INVALID_CURRENCY']}
 
 
 def leaves(value, path=()):

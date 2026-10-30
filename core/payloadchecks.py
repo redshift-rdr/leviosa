@@ -100,8 +100,8 @@ class Interactions:
         if self.callback is None:
             return ''
         parts = urlsplit(self.callback)
-        query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != 'leviosa']
-        return urlunsplit(parts._replace(query=urlencode([*query, ('leviosa', token)])))
+        query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != 'probe_token']
+        return urlunsplit(parts._replace(query=urlencode([*query, ('probe_token', token)])))
 
     def track(self, token, request, namespace):
         if self.path is not None:

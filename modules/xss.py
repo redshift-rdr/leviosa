@@ -16,7 +16,7 @@ class _Contexts(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         self.stack.append(tag)
-        if tag == 'leviosa-probe' and any(k == 'data-marker' and v == self.marker for k, v in attrs):
+        if tag == 'xssprobe' and any(k == 'data-marker' and v == self.marker for k, v in attrs):
             self.contexts.add('injected HTML element')
         for name, value in attrs:
             if value and self.marker in value:
@@ -42,8 +42,8 @@ class ReflectedXss(BaseModule):
     async def mutate(self, requests, context):
         def variants():
             for request in requests:
-                marker = 'leviosa' + uuid4().hex
-                payload = f'\'\"><leviosa-probe data-marker="{marker}"></leviosa-probe>'
+                marker = 'xssprobe' + uuid4().hex
+                payload = f'\'\"><xssprobe data-marker="{marker}"></xssprobe>'
                 for location, name, variant in input_variants(request, payload):
                     yield replace(variant, metadata={**variant.metadata,
                         'xss': (marker, location, name, payload)})

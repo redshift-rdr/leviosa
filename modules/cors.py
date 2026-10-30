@@ -12,12 +12,12 @@ _CONTEXT_KEY = "cors.findings"
 
 # Attacker-controlled origin used to detect blind reflection of an arbitrary
 # cross-origin. Overridable with --evil-origin.
-_DEFAULT_EVIL_ORIGIN = "https://leviosa-cors-probe.example"
+_DEFAULT_EVIL_ORIGIN = "https://corsprobe.example"
 
 # Label prepended to the target host for the "trusts any subdomain" probe, e.g.
-# https://leviosa-cors.target.com — catches policies that reflect any
+# https://corsprobe.target.com — catches policies that reflect any
 # *.target.com origin (a subdomain takeover then yields a working CORS bypass).
-_SUBDOMAIN_LABEL = "leviosa-cors"
+_SUBDOMAIN_LABEL = "corsprobe"
 
 
 class Cors(BaseModule):
@@ -30,10 +30,10 @@ class Cors(BaseModule):
     grant. The probe origins are:
 
       * arbitrary  — an attacker-controlled external origin
-                     (https://leviosa-cors-probe.example by default); reflection
+                     (https://corsprobe.example by default); reflection
                      means *any* site can read the response.
       * subdomain  — an arbitrary subdomain of the target host
-                     (https://leviosa-cors.<host>); reflection means any
+                     (https://corsprobe.<host>); reflection means any
                      subdomain is trusted, exploitable via subdomain takeover.
       * null       — the literal "null" origin, produced by sandboxed iframes and
                      some redirects; trusting it is a common bypass.
