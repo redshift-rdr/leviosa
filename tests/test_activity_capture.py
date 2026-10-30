@@ -198,12 +198,18 @@ async def test_chunked_request_raw_includes_transfer_framing(server):
 
 async def test_capture_matches_wire_with_stale_content_length(tmp_path):
     import asyncio
+    import inspect
+    import aiohttp
+    # Newer aiohttp constrains payload writes to the declared length. Capture
+    # must retain what was actually sent on either supported writer API.
+    limited = 'content_length' in inspect.signature(aiohttp.ClientRequest.write_bytes).parameters
+    expected_body = b'abc' if limited else b'abcdef'
     received = []
 
     async def handler(reader, writer):
         try:
             headers = await reader.readuntil(b'\r\n\r\n')
-            body = await reader.readexactly(6)
+            body = await reader.readexactly(len(expected_body))
             received.append(headers + body)
             writer.write(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok')
             await writer.drain()
@@ -217,7 +223,7 @@ async def test_capture_matches_wire_with_stale_content_length(tmp_path):
         path = tmp_path / 'log.sqlite'
         req = LeviosaRequest('POST', url, ['Content-Length: 3'], [], body=RequestBody('raw', 'abcdef'))
         await logged([req], path)
-        assert received[0].endswith(b'\r\n\r\nabcdef')
+        assert received[0].endswith(b'\r\n\r\n' + expected_body)
         assert read_rows(path)[0]['REQUEST_RAW'].encode() == received[0]
     finally:
         server.close()

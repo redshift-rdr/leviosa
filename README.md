@@ -37,11 +37,21 @@ JSON input and wordlists are loaded into memory; URL-list input streams from dis
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install --no-index --find-links=./bundled_requirements aiohttp
+python -m pip install -e .
 ```
 
-On Windows, `.\install.ps1` does the same (creates `.venv` and installs aiohttp
-from the bundled wheels).
+For offline Windows installation, `.\install.ps1` creates `.venv` and installs
+all dependencies from `bundled_requirements` using the version constraints in
+`pyproject.toml`. It stops if installation fails. The bundled native wheels target
+64-bit Windows CPython 3.12; other platforms/Python versions need matching wheels
+or the online installation above.
+
+The capture hook supports aiohttp 3.9 through 3.14, including the bundled 3.14.1
+writer's extra content-length argument and coalesced header/body writes. If an
+older checkout reports `CapturedRequest.write_bytes() takes 3 positional arguments
+but 4 were given`, its capture hook predates the installed aiohttp writer API.
+Use the updated capture code and dependency constraints together; replacing
+captured requests is not the remedy for that error.
 
 ### usage
 

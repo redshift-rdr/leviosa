@@ -45,23 +45,54 @@ class CapturedRequest(aiohttp.ClientRequest):
                 capture.request_target = str(self.url) if self.proxy and not self.is_ssl() else self.url.raw_path_qs
         return await super().send(conn)
 
-    async def write_bytes(self, writer, conn):
+    async def write_bytes(self, writer, conn, *args, **kwargs):
+        # aiohttp 3.12+ also supplies content_length. Forward it unchanged so
+        # the base writer keeps its own payload-length semantics.
         record = getattr(self, "_traffic_record", None)
         if record is None:
-            return await super().write_bytes(writer, conn)
-        # aiohttp 3.9's trace callback runs BEFORE transfer framing. Capture
-        # at the writer boundary so chunked bodies match submitted bytes.
+            return await super().write_bytes(writer, conn, *args, **kwargs)
+        # Newer writers coalesce buffered headers and body through _writelines;
+        # older ones send headers first and use _write for framed body chunks.
+        if getattr(writer, "_headers_buf", None):
+            record.request_raw = b""
         write = writer._write
+        writelines = getattr(writer, "_writelines", None)
+        depth = 0
 
         def captured_write(chunk):
-            write(chunk)
-            record.request_raw += bytes(chunk)
+            nonlocal depth
+            raw = bytes(chunk)
+            depth += 1
+            try:
+                result = write(chunk)
+            finally:
+                depth -= 1
+            if depth == 0:
+                record.request_raw += raw
+            return result
+
+        def captured_writelines(chunks):
+            nonlocal depth
+            chunks = tuple(chunks)
+            raw = b"".join(bytes(chunk) for chunk in chunks)
+            depth += 1
+            try:
+                result = writelines(chunks)
+            finally:
+                depth -= 1
+            if depth == 0:
+                record.request_raw += raw
+            return result
 
         writer._write = captured_write
+        if writelines is not None:
+            writer._writelines = captured_writelines
         try:
-            return await super().write_bytes(writer, conn)
+            return await super().write_bytes(writer, conn, *args, **kwargs)
         finally:
             writer._write = write
+            if writelines is not None:
+                writer._writelines = writelines
 
 
 def trace_config():

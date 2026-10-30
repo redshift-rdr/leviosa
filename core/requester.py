@@ -345,6 +345,7 @@ async def send(
             )
 
         inflight: set[asyncio.Task] = set()
+        completed: set[asyncio.Task] = set()
         try:
             # Prime the window.
             for _ in range(config.concurrency):
@@ -358,8 +359,10 @@ async def send(
                 done, inflight = await asyncio.wait(
                     inflight, return_when=asyncio.FIRST_COMPLETED
                 )
+                completed = set(done)
                 for t in done:
                     resp = t.result()
+                    completed.discard(t)
                     if logger is not None:
                         logger.log(resp, tool=tool)
                         resp.traffic.clear()
@@ -375,6 +378,7 @@ async def send(
             # Deterministic cleanup: cancel any in-flight tasks before the
             # session closes so an early break / exception / Ctrl-C in the
             # consumer never leaks tasks or an unclosed session.
-            for t in inflight:
+            remaining = inflight | completed
+            for t in remaining:
                 t.cancel()
-            await asyncio.gather(*inflight, return_exceptions=True)
+            await asyncio.gather(*remaining, return_exceptions=True)
